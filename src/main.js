@@ -167,12 +167,78 @@ class DatumBrainView extends ItemView {
     });
 
     this.hiddenGroups = new Set();
-    this.hideOrphans = false;
+    this.hiddenKinds = this.hiddenKinds || new Set();
+    this.layoutMode = this.layoutMode || "radial";
     this.showAllLabels = false;
     this.alpha = 1;
     this.hover = null; this.selected = null;
-    for (let i = 0; i < 180; i++) this.tick();
+    this.sectorInfo = [];
+    if (this.layoutMode === "radial"){
+      this.computeRadial();
+      for (const n of this.ALL){ if (n.tx !== undefined){ n.x = n.tx; n.y = n.ty; n.z = n.tz; } }
+    } else {
+      for (let i = 0; i < 180; i++) this.tick();
+    }
     this.alpha = .28;
+  }
+
+  kindKey(n){
+    return n.kind === "hub" ? "world" : n.kind === "star" ? "orphan" : n.d >= 10 ? "connector" : "note";
+  }
+
+  /* radial organisation-brain layout: sectors per system, ordered arcs per tier */
+  computeRadial(){
+    this.sectorInfo.length = 0;
+    const act = this.nodes.filter((n) => this.visible(n));
+    const byG = new Map();
+    act.forEach((n) => { if (!byG.has(n.g)) byG.set(n.g, []); byG.get(n.g).push(n); });
+    const gs = [...byG.keys()].sort((a, b) => a - b);
+    if (!gs.length) return;
+    const GAP = .09;
+    const total = act.length;
+    const avail = Math.PI * 2 - GAP * gs.length;
+    let theta = -Math.PI / 2;
+    const jitterY = (id) => ((hashStr(id + "y") % 1000) / 1000 - .5) * 16;
+    const rank = (n) => n.kind === "hub" ? 0 : n.d === 0 ? 3 : n.d >= 10 ? 1 : 2;
+    for (const g of gs){
+      const members = byG.get(g);
+      members.sort((a, b) => rank(a) - rank(b) || b.d - a.d);
+      const span = Math.max(.14, avail * members.length / total);
+      const mid = theta + span / 2;
+      const hubs = members.filter((n) => n.kind === "hub");
+      const rest = members.filter((n) => n.kind !== "hub");
+      hubs.forEach((n, i) => {
+        const t2 = hubs.length === 1 ? mid : theta + span * (.3 + .4 * i / Math.max(1, hubs.length - 1));
+        n.tx = Math.cos(t2) * 82; n.tz = Math.sin(t2) * 82; n.ty = jitterY(n.id) * .4;
+      });
+      let R = 124, i = 0;
+      while (i < rest.length){
+        const per = Math.max(3, Math.floor(span * R / 13));
+        const count = Math.min(per, rest.length - i);
+        for (let k = 0; k < count; k++, i++){
+          const n = rest[i];
+          const t2 = theta + span * ((k + .5) / count);
+          n.tx = Math.cos(t2) * R; n.tz = Math.sin(t2) * R; n.ty = jitterY(n.id);
+        }
+        R += 24;
+      }
+      this.sectorInfo.push({ g, mid, rOut: R });
+      theta += span + GAP;
+    }
+    this.core.tx = this.core.ty = this.core.tz = 0;
+  }
+
+  relayout(){
+    if (this.layoutMode === "radial") this.computeRadial();
+    else this.alpha = Math.max(this.alpha, .3);
+  }
+
+  setLayout(m){
+    this.layoutMode = m;
+    if (this.bLayout) this.bLayout.setText(m === "radial" ? "Orbit view" : "Radial view");
+    if (this.ringMeshes) this.ringMeshes.forEach((r) => { r.visible = m === "radial"; });
+    if (m === "radial") this.computeRadial(); else this.alpha = 1;
+    this.goHome();
   }
 
   radius(n){
@@ -180,7 +246,7 @@ class DatumBrainView extends ItemView {
       : n.kind === "star" ? 1.5 : 1.6 + Math.sqrt(n.d) * .42 + Math.min(n.w || 0, 2400) / 2400 * 1.1;
   }
   visible(n){
-    return n.kind === "core" || (!this.hiddenGroups.has(n.g) && !(this.hideOrphans && n.d === 0));
+    return n.kind === "core" || (!this.hiddenGroups.has(n.g) && !this.hiddenKinds.has(this.kindKey(n)));
   }
 
   tick(){
@@ -235,12 +301,15 @@ class DatumBrainView extends ItemView {
     const sw = this.sideEl.createDiv({ cls: "db-searchwrap" });
     this.searchEl = sw.createEl("input", { cls: "db-search", attr: { placeholder: "search the organism  ( / )", spellcheck: "false" } });
     this.resultsEl = sw.createDiv({ cls: "db-results" });
+    this.sideEl.createDiv({ cls: "db-k", text: "Node types" });
+    this.ntypesEl = this.sideEl.createDiv({ cls: "db-groups db-ntypes" });
     this.sideEl.createDiv({ cls: "db-k", text: "Systems" });
     this.groupsEl = this.sideEl.createDiv({ cls: "db-groups" });
     const ctl = this.sideEl.createDiv({ cls: "db-controls" });
     const btn = (label, cls) => ctl.createEl("button", { cls: "db-btn" + (cls ? " " + cls : ""), text: label });
-    const bHome = btn("Home", "db-gold"), bReheat = btn("Reheat"), bLabels = btn("Labels"),
-          bOrphans = btn("Orphans"), bSync = btn("Sync");
+    const bHome = btn("Home", "db-gold"), bLayout = btn("Orbit view"), bReheat = btn("Retidy"),
+          bLabels = btn("Labels"), bSync = btn("Sync");
+    this.bLayout = bLayout;
     this.statsEl = this.sideEl.createDiv({ cls: "db-stats" });
 
     /* reader */
@@ -263,29 +332,15 @@ class DatumBrainView extends ItemView {
     const hint = hudTxt.createDiv({ cls: "db-h" });
     hint.innerHTML = "<b>drag</b> orbit &middot; <b>scroll</b> zoom &middot; <b>click</b> a node to read &middot; <b>/</b> search";
 
-    /* group chips */
-    const counts = {};
-    this.nodes.forEach((n) => { counts[n.g] = (counts[n.g] || 0) + 1; });
-    this.groups.forEach((g, i) => {
-      const d = this.groupsEl.createDiv({ cls: "db-chip" });
-      const dot = d.createSpan({ cls: "db-dot" });
-      dot.style.background = gcol(i); dot.style.color = gcol(i);
-      d.createSpan({ text: g });
-      d.createSpan({ cls: "db-n", text: String(counts[i] || 0) });
-      d.onclick = () => {
-        this.hiddenGroups.has(i) ? this.hiddenGroups.delete(i) : this.hiddenGroups.add(i);
-        d.classList.toggle("db-off");
-        this.alpha = Math.max(this.alpha, .3); this.updateStats();
-      };
-    });
+    this.buildTypeRows();
+    this.buildChips();
     this.updateStats();
 
     bHome.onclick = () => { this.clearSel(); this.goHome(); };
     this.orbBtn.onclick = () => { this.clearSel(); this.goHome(); };
-    bReheat.onclick = () => { this.alpha = 1; };
+    bLayout.onclick = () => this.setLayout(this.layoutMode === "radial" ? "orbit" : "radial");
+    bReheat.onclick = () => { if (this.layoutMode === "radial") this.computeRadial(); else this.alpha = 1; };
     bLabels.onclick = () => { this.showAllLabels = !this.showAllLabels; bLabels.classList.toggle("db-on"); };
-    bOrphans.onclick = () => { this.hideOrphans = !this.hideOrphans; bOrphans.classList.toggle("db-on");
-      this.alpha = Math.max(this.alpha, .3); this.updateStats(); };
     bSync.onclick = () => this.resync();
     this.rClose.onclick = () => { this.clearSel(); };
     this.bFocus.onclick = () => { if (this.selected) this.flyTo(this.selected); };
@@ -332,6 +387,48 @@ class DatumBrainView extends ItemView {
     this.registerDomEvent(this.rBacks, "click", (e) => {
       const el = e.target.closest("[data-id]");
       if (el && this.byId.has(el.dataset.id)) this.select(this.byId.get(el.dataset.id));
+    });
+  }
+
+  buildTypeRows(){
+    this.ntypesEl.empty();
+    const KINDS = [
+      ["world", "Worlds", "#E0A94E"],
+      ["connector", "Connectors", "#8AA0C0"],
+      ["note", "Notes", "#5d6b8a"],
+      ["orphan", "Orphans", "#4a5266"],
+    ];
+    const kCounts = {};
+    this.nodes.forEach((n) => { const k = this.kindKey(n); kCounts[k] = (kCounts[k] || 0) + 1; });
+    for (const [key, label, col] of KINDS){
+      const d = this.ntypesEl.createDiv({ cls: "db-chip" + (this.hiddenKinds.has(key) ? " db-off" : "") });
+      const dot = d.createSpan({ cls: "db-dot" });
+      dot.style.background = col; dot.style.color = col;
+      d.createSpan({ text: label });
+      d.createSpan({ cls: "db-n", text: String(kCounts[key] || 0) });
+      d.onclick = () => {
+        this.hiddenKinds.has(key) ? this.hiddenKinds.delete(key) : this.hiddenKinds.add(key);
+        d.classList.toggle("db-off");
+        this.relayout(); this.updateStats();
+      };
+    }
+  }
+
+  buildChips(){
+    this.groupsEl.empty();
+    const counts = {};
+    this.nodes.forEach((n) => { counts[n.g] = (counts[n.g] || 0) + 1; });
+    this.groups.forEach((g, i) => {
+      const d = this.groupsEl.createDiv({ cls: "db-chip" + (this.hiddenGroups.has(i) ? " db-off" : "") });
+      const dot = d.createSpan({ cls: "db-dot" });
+      dot.style.background = gcol(i); dot.style.color = gcol(i);
+      d.createSpan({ text: g });
+      d.createSpan({ cls: "db-n", text: String(counts[i] || 0) });
+      d.onclick = () => {
+        this.hiddenGroups.has(i) ? this.hiddenGroups.delete(i) : this.hiddenGroups.add(i);
+        d.classList.toggle("db-off");
+        this.relayout(); this.updateStats();
+      };
     });
   }
 
@@ -406,23 +503,9 @@ class DatumBrainView extends ItemView {
     const tgt = this.controls ? this.controls.target.clone() : null;
     this.teardownScene();
     this.labelWrap.empty();
-    this.groupsEl.empty();
     this.buildGraph();
-    /* rebuild chips */
-    const counts = {};
-    this.nodes.forEach((n) => { counts[n.g] = (counts[n.g] || 0) + 1; });
-    this.groups.forEach((g, i) => {
-      const d = this.groupsEl.createDiv({ cls: "db-chip" });
-      const dot = d.createSpan({ cls: "db-dot" });
-      dot.style.background = gcol(i); dot.style.color = gcol(i);
-      d.createSpan({ text: g });
-      d.createSpan({ cls: "db-n", text: String(counts[i] || 0) });
-      d.onclick = () => {
-        this.hiddenGroups.has(i) ? this.hiddenGroups.delete(i) : this.hiddenGroups.add(i);
-        d.classList.toggle("db-off");
-        this.alpha = Math.max(this.alpha, .3); this.updateStats();
-      };
-    });
+    this.buildTypeRows();
+    this.buildChips();
     this.updateStats();
     this.buildScene();
     if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); }
@@ -437,7 +520,8 @@ class DatumBrainView extends ItemView {
 
     const scene = this.scene = new T.Scene();
     const camera = this.camera = new T.PerspectiveCamera(55, W / H, .1, 8000);
-    camera.position.set(0, 40, 260);
+    if (this.layoutMode === "radial") camera.position.set(0, 250, 300);
+    else camera.position.set(0, 40, 260);
     const renderer = this.renderer = new T.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(W, H);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -517,6 +601,18 @@ class DatumBrainView extends ItemView {
       sfGeo.setAttribute("position", new T.BufferAttribute(sfPos, 3));
       scene.add(new T.Points(sfGeo, new T.PointsMaterial({ map: GLOW, color: 0x8ea6d8, size: 2.6,
         sizeAttenuation: true, transparent: true, opacity: .38, depthWrite: false, blending: T.AdditiveBlending })));
+    }
+
+    /* concentric guide rings (radial mode) */
+    this.ringMeshes = [];
+    for (const R of [82, 124, 172, 220]){
+      const pts = [];
+      for (let i = 0; i <= 96; i++){ const a = i / 96 * Math.PI * 2; pts.push(new T.Vector3(Math.cos(a) * R, 0, Math.sin(a) * R)); }
+      const g = new T.BufferGeometry().setFromPoints(pts);
+      const m = new T.Line(g, new T.LineBasicMaterial({ color: 0x1a2440, transparent: true, opacity: .55,
+        blending: T.AdditiveBlending, depthWrite: false }));
+      m.visible = this.layoutMode === "radial";
+      scene.add(m); this.ringMeshes.push(m);
     }
 
     /* shaders */
@@ -636,6 +732,12 @@ class DatumBrainView extends ItemView {
       d.setText(n.t);
       this.labelEls.set(n.id, d);
     }
+    /* sector nameplates (radial mode) */
+    this.sectorLabelEls = this.groups.map((g) => {
+      const d = this.labelWrap.createDiv({ cls: "db-lbl db-lsect" });
+      d.setText(g.replace(/^_brain \/ /, ""));
+      return d;
+    });
 
     /* picking */
     const rc = this.rc = new T.Raycaster(); this.m2 = new T.Vector2();
@@ -783,7 +885,9 @@ class DatumBrainView extends ItemView {
   }
   goHome(){
     this.controls.autoRotate = true;
-    this.flyTarget = { tx: 0, ty: 0, tz: 0, cx: 0, cy: 40, cz: 260 };
+    this.flyTarget = this.layoutMode === "radial"
+      ? { tx: 0, ty: 0, tz: 0, cx: 0, cy: 250, cz: 300 }
+      : { tx: 0, ty: 0, tz: 0, cx: 0, cy: 40, cz: 260 };
   }
 
   startLoop(){
@@ -797,7 +901,14 @@ class DatumBrainView extends ItemView {
 
   frame(){
     const t = this.clock.getElapsedTime();
-    this.tick();
+    if (this.layoutMode === "radial"){
+      for (const n of this.ALL){
+        if (n.tx === undefined) continue;
+        n.x += (n.tx - n.x) * .08; n.y += (n.ty - n.y) * .08; n.z += (n.tz - n.z) * .08;
+      }
+    } else {
+      this.tick();
+    }
     if (this.flyTarget){
       const f = this.flyTarget, c = this.controls, cam = this.camera;
       c.target.x += (f.tx - c.target.x) * .1; c.target.y += (f.ty - c.target.y) * .1; c.target.z += (f.tz - c.target.z) * .1;
@@ -926,6 +1037,21 @@ class DatumBrainView extends ItemView {
       if (act && act.has(n.id) && n.kind !== "core") op = 1;
       el.style.transform = "translate(" + sx.toFixed(1) + "px," + sy.toFixed(1) + "px) translate(-50%,-150%)";
       el.style.opacity = String(op);
+    }
+    /* sector nameplates */
+    if (this.sectorLabelEls){
+      this.sectorLabelEls.forEach((el) => { el.style.opacity = "0"; });
+      if (this.layoutMode === "radial"){
+        for (const s of this.sectorInfo){
+          const el = this.sectorLabelEls[s.g]; if (!el) continue;
+          this.wp.set(Math.cos(s.mid) * (s.rOut + 16), 4, Math.sin(s.mid) * (s.rOut + 16));
+          this.pv.copy(this.wp).project(this.camera);
+          if (this.pv.z > 1 || this.pv.z < -1) continue;
+          el.style.transform = "translate(" + ((this.pv.x * .5 + .5) * this.W).toFixed(1) + "px," +
+            ((-this.pv.y * .5 + .5) * this.H).toFixed(1) + "px) translate(-50%,-50%)";
+          el.style.opacity = ".6";
+        }
+      }
     }
   }
 }

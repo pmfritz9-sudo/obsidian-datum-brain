@@ -1,7 +1,7 @@
 {
   "id": "datum-brain",
   "name": "Datum Brain",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minAppVersion": "1.4.0",
   "description": "A cosmic-organism 3D graph of your vault. MOC hubs become shader planets, notes become lit spheres orbiting a breathing gold core. Live data, WebGL bloom, click to read and open notes.",
   "author": "Paul Fritz",
