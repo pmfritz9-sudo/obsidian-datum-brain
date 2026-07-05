@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-datum-brain",
+  "version": "1.0.0",
+  "description": "Cosmic-organism 3D graph view for Obsidian",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs"
+  },
+  "keywords": ["obsidian", "graph", "three.js", "visualization"],
+  "author": "Paul Fritz",
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "three": "0.160.0"
+  }
+}
