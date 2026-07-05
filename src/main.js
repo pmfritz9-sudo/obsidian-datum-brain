@@ -172,7 +172,10 @@ class DatumBrainView extends ItemView {
     this.showAllLabels = false;
     this.alpha = 1;
     this.hover = null; this.selected = null;
+    this.focusedGroup = null;
     this.sectorInfo = [];
+    this.ringRadii = [];
+    this.layoutExtent = 300;
     if (this.layoutMode === "radial"){
       this.computeRadial();
       for (const n of this.ALL){ if (n.tx !== undefined){ n.x = n.tx; n.y = n.ty; n.z = n.tz; } }
@@ -186,47 +189,99 @@ class DatumBrainView extends ItemView {
     return n.kind === "hub" ? "world" : n.kind === "star" ? "orphan" : n.d >= 10 ? "connector" : "note";
   }
 
-  /* radial organisation-brain layout: sectors per system, ordered arcs per tier */
+  /* cluster-island layout: each system gets its own separated space */
   computeRadial(){
     this.sectorInfo.length = 0;
+    this.ringRadii = this.ringRadii || [];
+    this.ringRadii.length = 0;
     const act = this.nodes.filter((n) => this.visible(n));
     const byG = new Map();
     act.forEach((n) => { if (!byG.has(n.g)) byG.set(n.g, []); byG.get(n.g).push(n); });
-    const gs = [...byG.keys()].sort((a, b) => a - b);
-    if (!gs.length) return;
-    const GAP = .09;
-    const total = act.length;
-    const avail = Math.PI * 2 - GAP * gs.length;
-    let theta = -Math.PI / 2;
+    if (!byG.size){ this.layoutExtent = 200; this.applyRings(); return; }
     const jitterY = (id) => ((hashStr(id + "y") % 1000) / 1000 - .5) * 16;
     const rank = (n) => n.kind === "hub" ? 0 : n.d === 0 ? 3 : n.d >= 10 ? 1 : 2;
-    for (const g of gs){
-      const members = byG.get(g);
+    /* 1) local island layout: hub center, notes in rings around it */
+    const islands = [];
+    for (const [g, members] of byG){
       members.sort((a, b) => rank(a) - rank(b) || b.d - a.d);
-      const span = Math.max(.14, avail * members.length / total);
-      const mid = theta + span / 2;
       const hubs = members.filter((n) => n.kind === "hub");
       const rest = members.filter((n) => n.kind !== "hub");
+      const local = new Map();
       hubs.forEach((n, i) => {
-        const t2 = hubs.length === 1 ? mid : theta + span * (.3 + .4 * i / Math.max(1, hubs.length - 1));
-        n.tx = Math.cos(t2) * 82; n.tz = Math.sin(t2) * 82; n.ty = jitterY(n.id) * .4;
+        if (hubs.length === 1) local.set(n, [0, 0]);
+        else { const a = i / hubs.length * Math.PI * 2; local.set(n, [Math.cos(a) * 16, Math.sin(a) * 16]); }
       });
-      let R = 124, i = 0;
+      let r = hubs.length ? 30 : 14, i = 0;
+      const a0 = (hashStr(this.groups[g] || String(g)) % 628) / 100;
       while (i < rest.length){
-        const per = Math.max(3, Math.floor(span * R / 13));
+        const per = Math.max(4, Math.floor(Math.PI * 2 * r / 12));
         const count = Math.min(per, rest.length - i);
         for (let k = 0; k < count; k++, i++){
-          const n = rest[i];
-          const t2 = theta + span * ((k + .5) / count);
-          n.tx = Math.cos(t2) * R; n.tz = Math.sin(t2) * R; n.ty = jitterY(n.id);
+          const a = a0 + k / count * Math.PI * 2;
+          local.set(rest[i], [Math.cos(a) * r, Math.sin(a) * r]);
         }
-        R += 24;
+        r += 18;
       }
-      this.sectorInfo.push({ g, mid, rOut: R });
-      theta += span + GAP;
+      islands.push({ g, local, r: Math.max(r - 18, 14) + 10 });
     }
+    /* 2) pack islands onto concentric orbit rings with generous gaps */
+    islands.sort((a, b) => b.r - a.r);
+    let prevOuter = 55, idx = 0;
+    while (idx < islands.length){
+      const rMax = islands[idx].r;
+      const R = prevOuter + rMax + 55;
+      const ring = [];
+      let used = 0;
+      while (idx < islands.length){
+        const w = 2 * Math.asin(Math.min(.95, (islands[idx].r + 26) / R));
+        if (ring.length && used + w > Math.PI * 2) break;
+        ring.push([islands[idx], w]); used += w; idx++;
+      }
+      this.ringRadii.push(R);
+      const slack = Math.max(0, (Math.PI * 2 - used) / ring.length);
+      let theta = -Math.PI / 2 + (this.ringRadii.length - 1) * .7;
+      for (const [isl, w] of ring){
+        const midA = theta + (w + slack) / 2;
+        const cx = Math.cos(midA) * R, cz = Math.sin(midA) * R;
+        for (const [n, lp] of isl.local){
+          n.tx = cx + lp[0]; n.tz = cz + lp[1];
+          n.ty = jitterY(n.id) * (n.kind === "hub" ? .3 : 1);
+        }
+        this.sectorInfo.push({ g: isl.g, cx, cz, r: isl.r });
+        theta += w + slack;
+      }
+      prevOuter = R + rMax;
+    }
+    this.layoutExtent = prevOuter;
     this.core.tx = this.core.ty = this.core.tz = 0;
+    this.applyRings();
   }
+
+  applyRings(){
+    if (!this.orbitRings) return;
+    this.orbitRings.forEach((m, i) => {
+      const R = this.ringRadii[i];
+      m.visible = this.layoutMode === "radial" && !!R;
+      if (R) m.scale.setScalar(R);
+    });
+    this.islandRings.forEach((m, gi) => {
+      const s = this.sectorInfo.find((x) => x.g === gi);
+      m.visible = this.layoutMode === "radial" && !!s;
+      if (s){ m.position.set(s.cx, 0, s.cz); m.scale.setScalar(s.r + 10); }
+    });
+  }
+
+  /* drill into a cluster: camera dives in, everything else recedes */
+  enterCluster(g){
+    const s = this.sectorInfo.find((x) => x.g === g);
+    if (!s) return;
+    this.focusedGroup = g;
+    this.controls.autoRotate = false;
+    const d = Math.max(70, s.r * 2.7);
+    this.flyTarget = { tx: s.cx, ty: 0, tz: s.cz, cx: s.cx, cy: d * .8, cz: s.cz + d * .75 };
+    if (this.zEl){ this.zEl.setText((this.groups[g] || "").replace(/^_brain \/ /, "").toLowerCase()); this._lastZ = "__cluster"; }
+  }
+  exitCluster(){ this.goHome(); }
 
   relayout(){
     if (this.layoutMode === "radial") this.computeRadial();
@@ -235,9 +290,9 @@ class DatumBrainView extends ItemView {
 
   setLayout(m){
     this.layoutMode = m;
-    if (this.bLayout) this.bLayout.setText(m === "radial" ? "Orbit view" : "Radial view");
-    if (this.ringMeshes) this.ringMeshes.forEach((r) => { r.visible = m === "radial"; });
+    if (this.bLayout) this.bLayout.setText(m === "radial" ? "Orbit view" : "Cluster view");
     if (m === "radial") this.computeRadial(); else this.alpha = 1;
+    this.applyRings();
     this.goHome();
   }
 
@@ -330,7 +385,7 @@ class DatumBrainView extends ItemView {
     const hudTxt = hud.createDiv();
     this.zEl = hudTxt.createDiv({ cls: "db-z", text: "organism" });
     const hint = hudTxt.createDiv({ cls: "db-h" });
-    hint.innerHTML = "<b>drag</b> orbit &middot; <b>scroll</b> zoom &middot; <b>click</b> a node to read &middot; <b>/</b> search";
+    hint.innerHTML = "<b>click</b> a world or name to enter its system &middot; <b>Esc</b> zooms out &middot; <b>/</b> search";
 
     this.buildTypeRows();
     this.buildChips();
@@ -365,7 +420,10 @@ class DatumBrainView extends ItemView {
       if (e.key === "/" && document.activeElement !== this.searchEl){
         e.preventDefault(); this.searchEl.focus(); this.searchEl.select();
       }
-      if (e.key === "Escape" && document.activeElement !== this.searchEl) this.clearSel();
+      if (e.key === "Escape" && document.activeElement !== this.searchEl){
+        if (this.readerEl.classList.contains("db-open")) this.clearSel();
+        else if (this.focusedGroup != null) this.exitCluster();
+      }
     });
     this.root.tabIndex = -1;
     this.registerDomEvent(this.root, "pointerdown", (e) => {
@@ -467,6 +525,7 @@ class DatumBrainView extends ItemView {
 
   async select(n, keepCam){
     this.selected = n;
+    if (this.layoutMode === "radial" && this.focusedGroup != null && n.g !== this.focusedGroup) this.focusedGroup = n.g;
     this.spawnParticles(n);
     this.rTitle.setText(n.t);
     const dt = new Date(n.m).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
@@ -520,7 +579,7 @@ class DatumBrainView extends ItemView {
 
     const scene = this.scene = new T.Scene();
     const camera = this.camera = new T.PerspectiveCamera(55, W / H, .1, 8000);
-    if (this.layoutMode === "radial") camera.position.set(0, 250, 300);
+    if (this.layoutMode === "radial") camera.position.set(0, this.layoutExtent * 1.1 + 130, this.layoutExtent * 1.15 + 150);
     else camera.position.set(0, 40, 260);
     const renderer = this.renderer = new T.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(W, H);
@@ -539,7 +598,7 @@ class DatumBrainView extends ItemView {
 
     const controls = this.controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true; controls.dampingFactor = .06;
-    controls.minDistance = 30; controls.maxDistance = 1100;
+    controls.minDistance = 30; controls.maxDistance = 1800;
     controls.autoRotate = true; controls.autoRotateSpeed = .35;
 
     const composer = this.composer = new EffectComposer(renderer);
@@ -603,17 +662,18 @@ class DatumBrainView extends ItemView {
         sizeAttenuation: true, transparent: true, opacity: .38, depthWrite: false, blending: T.AdditiveBlending })));
     }
 
-    /* concentric guide rings (radial mode) */
-    this.ringMeshes = [];
-    for (const R of [82, 124, 172, 220]){
-      const pts = [];
-      for (let i = 0; i <= 96; i++){ const a = i / 96 * Math.PI * 2; pts.push(new T.Vector3(Math.cos(a) * R, 0, Math.sin(a) * R)); }
-      const g = new T.BufferGeometry().setFromPoints(pts);
-      const m = new T.Line(g, new T.LineBasicMaterial({ color: 0x1a2440, transparent: true, opacity: .55,
+    /* guide rings: unit circle scaled to orbit rings + one boundary ring per island */
+    const circPts = [];
+    for (let i = 0; i <= 96; i++){ const a = i / 96 * Math.PI * 2; circPts.push(new T.Vector3(Math.cos(a), 0, Math.sin(a))); }
+    const unitCircle = new T.BufferGeometry().setFromPoints(circPts);
+    const mkRing = (color, op) => {
+      const m = new T.Line(unitCircle, new T.LineBasicMaterial({ color, transparent: true, opacity: op,
         blending: T.AdditiveBlending, depthWrite: false }));
-      m.visible = this.layoutMode === "radial";
-      scene.add(m); this.ringMeshes.push(m);
-    }
+      m.visible = false; scene.add(m); return m;
+    };
+    this.orbitRings = [0,1,2,3,4,5].map(() => mkRing(0x1a2440, .5));
+    this.islandRings = this.groups.map(() => mkRing(0x243154, .5));
+    this.applyRings();
 
     /* shaders */
     const planetMat = (hex, seed) => new T.ShaderMaterial({
@@ -721,6 +781,7 @@ class DatumBrainView extends ItemView {
     this.up = new T.Vector3(0, 1, 0); this.tmpV = new T.Vector3(); this.perV = new T.Vector3();
     this.bz = { cx: 0, cy: 0, cz: 0 };
     this.hotColor = new T.Color();
+    this.dimColor = new T.Color();
     this.pv = new T.Vector3(); this.wp = new T.Vector3();
     this.particles = [];
     this.flyTarget = null;
@@ -732,10 +793,11 @@ class DatumBrainView extends ItemView {
       d.setText(n.t);
       this.labelEls.set(n.id, d);
     }
-    /* sector nameplates (radial mode) */
-    this.sectorLabelEls = this.groups.map((g) => {
+    /* island nameplates (radial mode) — click to enter the cluster */
+    this.sectorLabelEls = this.groups.map((g, gi) => {
       const d = this.labelWrap.createDiv({ cls: "db-lbl db-lsect" });
       d.setText(g.replace(/^_brain \/ /, ""));
+      d.onclick = () => { if (this.layoutMode === "radial") this.enterCluster(gi); };
       return d;
     });
 
@@ -750,7 +812,8 @@ class DatumBrainView extends ItemView {
       downAt = null;
       const n = this.castAt(e);
       if (!n){ this.clearSel(); return; }
-      if (n.kind === "core"){ this.goHome(); return; }
+      if (n.kind === "core"){ this.exitCluster(); return; }
+      if (this.layoutMode === "radial" && n.kind === "hub" && this.focusedGroup !== n.g){ this.enterCluster(n.g); return; }
       this.select(n);
     };
     let hoverTick = 0;
@@ -766,6 +829,7 @@ class DatumBrainView extends ItemView {
     /* zoom label */
     this._lastZ = "";
     const onCtl = () => {
+      if (this.focusedGroup != null) return;   /* breadcrumb shows the cluster name while inside */
       const d = controls.getDistance();
       const s = d < 90 ? "synapse" : d < 180 ? "system" : d > 500 ? "deep space" : "organism";
       if (s !== this._lastZ){ this.zEl.setText(s); this._lastZ = s; }
@@ -808,6 +872,7 @@ class DatumBrainView extends ItemView {
     if (this.renderer.forceContextLoss) this.renderer.forceContextLoss();
     if (this.renderer.domElement.parentNode) this.renderer.domElement.parentNode.removeChild(this.renderer.domElement);
     this.renderer = null;
+    this.orbitRings = null; this.islandRings = null;
   }
 
   castAt(ev){
@@ -884,9 +949,10 @@ class DatumBrainView extends ItemView {
       cx: n.x + dir.x * dist, cy: n.y + dir.y * dist, cz: n.z + dir.z * dist };
   }
   goHome(){
+    this.focusedGroup = null;
     this.controls.autoRotate = true;
     this.flyTarget = this.layoutMode === "radial"
-      ? { tx: 0, ty: 0, tz: 0, cx: 0, cy: 250, cz: 300 }
+      ? { tx: 0, ty: 0, tz: 0, cx: 0, cy: this.layoutExtent * 1.1 + 130, cz: this.layoutExtent * 1.15 + 150 }
       : { tx: 0, ty: 0, tz: 0, cx: 0, cy: 40, cz: 260 };
   }
 
@@ -927,7 +993,7 @@ class DatumBrainView extends ItemView {
       const vis = this.visible(n);
       m.visible = vis;
       if (!vis) continue;
-      const on = !act || act.has(n.id);
+      const on = (!act || act.has(n.id)) && (this.focusedGroup == null || n.g === this.focusedGroup || n.kind === "core");
       if (n.kind === "core"){
         m.position.set(n.x, n.y, n.z); m.rotation.y += .002;
       } else if (n.kind === "hub"){
@@ -949,7 +1015,7 @@ class DatumBrainView extends ItemView {
     for (let i = 0; i < this.ORBS.length; i++){
       const n = this.ORBS[i];
       const nvis = this.visible(n);
-      const on = !act || act.has(n.id);
+      const on = (!act || act.has(n.id)) && (this.focusedGroup == null || n.g === this.focusedGroup);
       const focus = n === focusN;
       this.dummy.position.set(n.x, n.y, n.z);
       this.dummy.scale.setScalar(nvis ? this.radius(n) * (focus ? 1.45 : 1) : .0001);
@@ -989,6 +1055,9 @@ class DatumBrainView extends ItemView {
       else if (isHot && focusN && (a === focusN || b === focusN)) col = (focusN.kind === "hub" || focusN.kind === "core") ? this.C_HOT : this.C_HOT2;
       else col = l.c;
       if (act && !on && lVis){ this.hotColor.copy(l.c).multiplyScalar(.15); col = this.hotColor; }
+      if (this.focusedGroup != null && lVis && a.g !== this.focusedGroup && b.g !== this.focusedGroup){
+        this.dimColor.copy(col).multiplyScalar(.1); col = this.dimColor;
+      }
       this.bez(a, b);
       const bz = this.bz;
       for (let s = 0; s < SEG; s++){
@@ -1027,7 +1096,7 @@ class DatumBrainView extends ItemView {
       this.wp.set(n.x, n.y, n.z); this.pv.copy(this.wp).project(this.camera);
       if (this.pv.z > 1 || this.pv.z < -1){ el.style.opacity = "0"; continue; }
       const sx = (this.pv.x * .5 + .5) * this.W, sy = (-this.pv.y * .5 + .5) * this.H;
-      const on = !act || act.has(n.id);
+      const on = (!act || act.has(n.id)) && (this.focusedGroup == null || n.g === this.focusedGroup || n.kind === "core");
       const dist = this.camera.position.distanceTo(this.wp);
       let op;
       if (n.kind === "core") op = 1;
@@ -1035,6 +1104,7 @@ class DatumBrainView extends ItemView {
       else if (this.showAllLabels || n === focusN) op = on ? 1 : .3;
       else op = (dist < 130 ? .95 : dist < 220 ? .45 : 0) * (on ? 1 : .18);
       if (act && act.has(n.id) && n.kind !== "core") op = 1;
+      if (this.focusedGroup != null) op = (n.g === this.focusedGroup) ? Math.max(op, .95) : (n.kind === "core" ? op : 0);
       el.style.transform = "translate(" + sx.toFixed(1) + "px," + sy.toFixed(1) + "px) translate(-50%,-150%)";
       el.style.opacity = String(op);
     }
@@ -1044,12 +1114,13 @@ class DatumBrainView extends ItemView {
       if (this.layoutMode === "radial"){
         for (const s of this.sectorInfo){
           const el = this.sectorLabelEls[s.g]; if (!el) continue;
-          this.wp.set(Math.cos(s.mid) * (s.rOut + 16), 4, Math.sin(s.mid) * (s.rOut + 16));
+          const dd = Math.hypot(s.cx, s.cz) || 1;
+          this.wp.set(s.cx + s.cx / dd * (s.r + 16), 4, s.cz + s.cz / dd * (s.r + 16));
           this.pv.copy(this.wp).project(this.camera);
           if (this.pv.z > 1 || this.pv.z < -1) continue;
           el.style.transform = "translate(" + ((this.pv.x * .5 + .5) * this.W).toFixed(1) + "px," +
             ((-this.pv.y * .5 + .5) * this.H).toFixed(1) + "px) translate(-50%,-50%)";
-          el.style.opacity = ".6";
+          el.style.opacity = this.focusedGroup == null ? ".6" : (s.g === this.focusedGroup ? ".9" : ".08");
         }
       }
     }
