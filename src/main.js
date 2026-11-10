@@ -7,7 +7,7 @@
  * Live data: graph derives from metadataCache.resolvedLinks, so it always
  * reflects the vault. Click a node to read it; "Open note" jumps to the editor.
  */
-import { Plugin, ItemView, MarkdownRenderer, Component, debounce } from "obsidian";
+import { Plugin, ItemView, MarkdownRenderer, Component, debounce, getLinkpath } from "obsidian";
 import * as T from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -79,7 +79,7 @@ class DatumBrainView extends ItemView {
     catch (e){ this.failOpen(e); return; }
     this.startLoop();
     /* live topology sync: rebuild (debounced) when the vault's link graph changes */
-    this._resync = debounce(() => this.resync(), 3000, true);
+    this._resync = debounce(() => this.resync(true), 3000, true);
     this.registerEvent(this.app.metadataCache.on("resolved", this._resync));
   }
 
@@ -98,6 +98,7 @@ class DatumBrainView extends ItemView {
     console.error("[datum-brain] could not start the 3D view", e);
     this._closed = true;
     this.teardownScene();
+    this.closeReader();
     this.root.empty();
     const box = this.root.createDiv({ cls: "db-fatal" });
     box.createEl("b", { text: "Datum Brain could not start the 3D view." });
@@ -111,6 +112,18 @@ class DatumBrainView extends ItemView {
     if (parts.length === 1) return "root";
     if (parts[0] === "_brain" && parts.length >= 3) return "_brain / " + parts[1];
     return parts[0];
+  }
+
+  /* what the automatic resync compares: sorted note paths plus directed link pairs */
+  topoSig(){
+    const resolved = this.app.metadataCache.resolvedLinks;
+    const paths = this.app.vault.getMarkdownFiles().map((f) => f.path).sort();
+    const have = new Set(paths), pairs = [];
+    for (const src in resolved){
+      if (!have.has(src)) continue;
+      for (const dst in resolved[src]) if (dst !== src && have.has(dst)) pairs.push(src + "\n" + dst);
+    }
+    return paths.join("\n") + "\n\n" + pairs.sort().join("\n");
   }
 
   buildGraph(){
@@ -136,12 +149,15 @@ class DatumBrainView extends ItemView {
 
     const links = [];
     const seen = new Set();
+    const backlinks = new Map(nodes.map((n) => [n.id, []]));
     for (const src in resolved){
       const a = byPath.get(src);
       if (!a) continue;
       for (const dst in resolved[src]){
         const b = byPath.get(dst);
         if (!b || a === b) continue;
+        /* backlinks follow the directed link; the drawn edge below is one per pair */
+        backlinks.get(b.id).push(a.id);
         const key = a.id < b.id ? a.id + "\n" + b.id : b.id + "\n" + a.id;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -149,11 +165,9 @@ class DatumBrainView extends ItemView {
       }
     }
     const adj = new Map(nodes.map((n) => [n.id, new Set()]));
-    const backlinks = new Map(nodes.map((n) => [n.id, []]));
     for (const l of links){
       l.s.d++; l.t.d++;
       adj.get(l.s.id).add(l.t.id); adj.get(l.t.id).add(l.s.id);
-      backlinks.get(l.t.id).push(l.s.id);
     }
 
     /* tiers: planets for the strongest hubs, dust for orphans, spheres for the rest */
@@ -174,6 +188,7 @@ class DatumBrainView extends ItemView {
     this.links = links;
     this.ALL_LINKS = links.concat(this.coreLinks);
     this.byId = byPath; this.adj = adj; this.backlinks = backlinks;
+    this._topo = this.topoSig();
 
     /* seed positions: each system radiates from a fibonacci direction */
     const dirs = [];
@@ -303,6 +318,10 @@ class DatumBrainView extends ItemView {
     this.controls.autoRotate = false;
     const d = Math.max(70, s.r * 2.7);
     this.flyTarget = { tx: s.cx, ty: 0, tz: s.cz, cx: s.cx, cy: d * .8, cz: s.cz + d * .75 };
+    this.crumb(g);
+  }
+  /* HUD breadcrumb: the name of the focused system */
+  crumb(g){
     if (this.zEl){ this.zEl.setText((this.groups[g] || "").replace(/^_brain \/ /, "").toLowerCase()); this._lastZ = "__cluster"; }
   }
   exitCluster(){ this.goHome(); }
@@ -441,15 +460,19 @@ class DatumBrainView extends ItemView {
         this.selIdx = Math.max(0, Math.min(this.curMatches.length - 1, this.selIdx + (e.key === "ArrowDown" ? 1 : -1)));
         [...this.resultsEl.children].forEach((c, i) => c.classList.toggle("db-sel", i === this.selIdx));
       } else if (e.key === "Enter" && this.curMatches.length){
+        /* Enter and Escape belong to the search box: they must not reach the view's own key handler */
+        e.stopPropagation();
         this.select(this.curMatches[Math.max(0, this.selIdx)]);
         this.resultsEl.style.display = "none"; this.searchEl.blur();
-      } else if (e.key === "Escape"){ this.resultsEl.style.display = "none"; this.searchEl.blur(); }
+      } else if (e.key === "Escape"){ e.stopPropagation(); this.resultsEl.style.display = "none"; this.searchEl.blur(); }
     });
     this.registerDomEvent(this.root, "keydown", (e) => {
-      if (e.key === "/" && document.activeElement !== this.searchEl){
+      /* the event target, not document.activeElement: in a pop-out window that is another window's document */
+      const typing = e.target === this.searchEl;
+      if (e.key === "/" && !typing){
         e.preventDefault(); this.searchEl.focus(); this.searchEl.select();
       }
-      if (e.key === "Escape" && document.activeElement !== this.searchEl){
+      if (e.key === "Escape" && !typing){
         if (this.readerEl.classList.contains("db-open")) this.clearSel();
         else if (this.focusedGroup != null) this.exitCluster();
       }
@@ -465,7 +488,9 @@ class DatumBrainView extends ItemView {
       e.preventDefault(); e.stopPropagation();
       const href = a.getAttribute("data-href") || a.getAttribute("href");
       if (!href) return;
-      const f = this.app.metadataCache.getFirstLinkpathDest(href, this.selected ? this.selected.id : "");
+      /* a heading or block link resolves by its link path; an empty path is a link into the current note */
+      const lp = getLinkpath(href), cur = this.selected;
+      const f = lp ? this.app.metadataCache.getFirstLinkpathDest(lp, cur ? cur.id : "") : (cur && cur.file);
       if (!f) return;
       if (e.metaKey || e.ctrlKey){ this.app.workspace.getLeaf("tab").openFile(f); return; }
       const n = this.byId.get(f.path);
@@ -525,9 +550,15 @@ class DatumBrainView extends ItemView {
     this.statsEl.setText(`${vis} / ${this.nodes.length} notes · ${vl} / ${this.links.length} links · ${this.HUBS.size} worlds`);
   }
 
+  /* matches hold node objects of the current graph: dropped with it, and when the query is emptied */
+  clearSearch(){
+    this.curMatches = []; this.selIdx = -1;
+    this.resultsEl.empty(); this.resultsEl.style.display = "none";
+  }
+
   doSearch(q){
     q = q.trim().toLowerCase();
-    if (!q){ this.resultsEl.style.display = "none"; return; }
+    if (!q){ this.clearSearch(); return; }
     const scored = [];
     for (const n of this.nodes){
       const t = n.t.toLowerCase(), p = n.id.toLowerCase();
@@ -556,7 +587,7 @@ class DatumBrainView extends ItemView {
     /* each selection is numbered: a slower, older read must never write into the reader */
     const seq = ++this._selSeq;
     this.selected = n;
-    if (this.layoutMode === "radial" && this.focusedGroup != null && n.g !== this.focusedGroup) this.focusedGroup = n.g;
+    if (this.layoutMode === "radial" && this.focusedGroup != null && n.g !== this.focusedGroup){ this.focusedGroup = n.g; this.crumb(n.g); }
     this.spawnParticles(n);
     this.rTitle.setText(n.t);
     const dt = new Date(n.m).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
@@ -599,25 +630,39 @@ class DatumBrainView extends ItemView {
 
   clearSel(){
     this.selected = null; this.killParticles();
+    this.closeReader();
+  }
+
+  /* closing the reader drops a pending read, releases the rendered note and leaves nothing behind in the pane */
+  closeReader(){
+    this._selSeq++;
+    if (this._readerComp){ this.removeChild(this._readerComp); this._readerComp = null; }
+    this.rTitle.empty(); this.rMeta.empty(); this.rBody.empty(); this.rBacks.empty();
     this.readerEl.classList.remove("db-open");
   }
 
-  async resync(){
+  /* auto: the debounced vault event, skipped while the topology is unchanged; the Sync button always rebuilds */
+  async resync(auto){
     if (this._closed || !this.renderer) return;
+    if (auto && this.topoSig() === this._topo) return;
     const selId = this.selected ? this.selected.id : null;
     const cam = this.camera ? this.camera.position.clone() : null;
     const tgt = this.controls ? this.controls.target.clone() : null;
-    const auto = this.controls ? this.controls.autoRotate : true;
+    const rot = this.controls ? this.controls.autoRotate : true;
+    const fly = this.flyTarget;
     this.teardownScene();
     this.labelWrap.empty();
     this.buildGraph();
+    this.clearSearch();
     this.buildTypeRows();
     this.buildChips();
     this.updateStats();
     try { this.buildScene(); }
     catch (e){ this.failOpen(e); return; }
-    if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); this.controls.autoRotate = auto; }
+    /* a flight in progress carries on: a home flight still has to arrive to turn auto-rotation back on */
+    if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); this.controls.autoRotate = rot; this.flyTarget = fly; }
     if (selId && this.byId.has(selId)) this.select(this.byId.get(selId), true);
+    else if (selId) this.closeReader();
   }
 
   /* =================== scene =================== */
@@ -803,6 +848,8 @@ class DatumBrainView extends ItemView {
     const orbMat = new T.MeshStandardMaterial({ roughness: .5, metalness: .18 });
     const orbMesh = this.orbMesh = new T.InstancedMesh(orbGeo, orbMat, Math.max(1, ORBS.length));
     orbMesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
+    /* instances and link vertices move every frame: three.js must not cull them by the bounds it cached first */
+    orbMesh.frustumCulled = false;
     this.dummy = new T.Object3D(); this.cTmp = new T.Color();
     ORBS.forEach((n, i) => { this.cTmp.set(gcol(n.g)); orbMesh.setColorAt(i, this.cTmp); });
     scene.add(orbMesh);
@@ -812,13 +859,16 @@ class DatumBrainView extends ItemView {
     /* links buffer */
     const SEG = this.SEG = 8;
     const nL = this.ALL_LINKS.length;
-    const lPos = this.lPos = new Float32Array(Math.max(1, nL * SEG * 2 * 3));
-    const lCol = this.lCol = new Float32Array(Math.max(1, nL * SEG * 2 * 3));
+    /* never less than one whole vertex, so a vault with no links still makes a valid buffer */
+    const lPos = this.lPos = new Float32Array(Math.max(3, nL * SEG * 2 * 3));
+    const lCol = this.lCol = new Float32Array(Math.max(3, nL * SEG * 2 * 3));
     const lGeo = this.lGeo = new T.BufferGeometry();
     lGeo.setAttribute("position", new T.BufferAttribute(lPos, 3));
     lGeo.setAttribute("color", new T.BufferAttribute(lCol, 3));
-    scene.add(new T.LineSegments(lGeo, new T.LineBasicMaterial({ vertexColors: true, transparent: true,
-      opacity: .7, blending: T.AdditiveBlending, depthWrite: false })));
+    const linkLines = this.linkLines = new T.LineSegments(lGeo, new T.LineBasicMaterial({ vertexColors: true, transparent: true,
+      opacity: .7, blending: T.AdditiveBlending, depthWrite: false }));
+    linkLines.frustumCulled = false;
+    scene.add(linkLines);
     this.C_CORE = new T.Color(0x584422); this.C_HOT = new T.Color(0xE0A94E);
     this.C_HOT2 = new T.Color(0x4FA3FF); this.C_OFF = new T.Color(0x000000);
     for (const l of this.ALL_LINKS){
@@ -871,9 +921,19 @@ class DatumBrainView extends ItemView {
       const n = this.castAt(e);
       if (n !== this.hover){ this.hover = (n && n.kind !== "core") ? n : null; cvs.style.cursor = n ? "pointer" : "grab"; }
     };
+    /* the pointer left the canvas (for the reader, the rail, another pane): nothing is hovered any more */
+    const onLeave = () => { this.hover = null; cvs.style.cursor = "grab"; };
     cvs.addEventListener("pointerdown", onDown);
     cvs.addEventListener("pointerup", onUp);
     cvs.addEventListener("pointermove", onMove);
+    cvs.addEventListener("pointerleave", onLeave);
+    /* the user's own orbit, pan or zoom always wins over a camera flight; an interrupted home flight counts as arrived */
+    const onStart = () => {
+      if (!this.flyTarget) return;
+      if (this.flyTarget.home) controls.autoRotate = true;
+      this.flyTarget = null;
+    };
+    controls.addEventListener("start", onStart);
 
     /* zoom label */
     this._lastZ = "";
@@ -900,6 +960,8 @@ class DatumBrainView extends ItemView {
       cvs.removeEventListener("pointerdown", onDown);
       cvs.removeEventListener("pointerup", onUp);
       cvs.removeEventListener("pointermove", onMove);
+      cvs.removeEventListener("pointerleave", onLeave);
+      controls.removeEventListener("start", onStart);
       controls.removeEventListener("change", onCtl);
     });
   }
@@ -935,6 +997,8 @@ class DatumBrainView extends ItemView {
     for (let i = 0; i < this.pickables.length; i++){
       if (this.visible(this.pickMap[i])){ objs.push(this.pickables[i]); map.push(this.pickMap[i]); }
     }
+    /* the raycast first tests the instanced mesh's bounding sphere: bring it up to the current layout */
+    this.orbMesh.computeBoundingSphere();
     const hit = this.rc.intersectObjects(objs, true);
     for (const h of hit){
       if (h.object === this.orbMesh){
@@ -1001,10 +1065,11 @@ class DatumBrainView extends ItemView {
   }
   goHome(){
     this.focusedGroup = null;
-    this.controls.autoRotate = true;
+    /* auto-rotation would fight the flight: it comes back on when the home flight arrives (see frame) */
+    this.controls.autoRotate = false;
     this.flyTarget = this.layoutMode === "radial"
-      ? { tx: 0, ty: 0, tz: 0, cx: 0, cy: this.layoutExtent * 1.1 + 130, cz: this.layoutExtent * 1.15 + 150 }
-      : { tx: 0, ty: 0, tz: 0, cx: 0, cy: 40, cz: 260 };
+      ? { home: true, tx: 0, ty: 0, tz: 0, cx: 0, cy: this.layoutExtent * 1.1 + 130, cz: this.layoutExtent * 1.15 + 150 }
+      : { home: true, tx: 0, ty: 0, tz: 0, cx: 0, cy: 40, cz: 260 };
   }
 
   startLoop(){
@@ -1032,7 +1097,13 @@ class DatumBrainView extends ItemView {
       cam.position.x += (f.cx - cam.position.x) * .1;
       cam.position.y += (f.cy - cam.position.y) * .1;
       cam.position.z += (f.cz - cam.position.z) * .1;
-      if (Math.abs(cam.position.x - f.cx) < .5 && Math.abs(cam.position.y - f.cy) < .5) this.flyTarget = null;
+      /* arrived when the camera and the orbit target are both there, in all three axes. A goal the orbit limits
+         keep out of reach (a home view beyond maxDistance in a very large vault) ends after 240 frames instead */
+      if ((Math.hypot(cam.position.x - f.cx, cam.position.y - f.cy, cam.position.z - f.cz) < .5 &&
+          Math.hypot(c.target.x - f.tx, c.target.y - f.ty, c.target.z - f.tz) < .5) || (f.n = (f.n || 0) + 1) > 240){
+        if (f.home) c.autoRotate = true;
+        this.flyTarget = null;
+      }
     }
     this.controls.update();
     this.timeMats.forEach((m) => { if (m.uniforms && m.uniforms.uTime) m.uniforms.uTime.value = t; });
@@ -1161,7 +1232,8 @@ class DatumBrainView extends ItemView {
     }
     /* sector nameplates */
     if (this.sectorLabelEls){
-      this.sectorLabelEls.forEach((el) => { el.style.opacity = "0"; });
+      /* a nameplate that is not shown must not take the pointer either: opacity alone leaves it clickable */
+      this.sectorLabelEls.forEach((el) => { el.style.opacity = "0"; el.style.pointerEvents = "none"; });
       if (this.layoutMode === "radial"){
         for (const s of this.sectorInfo){
           const el = this.sectorLabelEls[s.g]; if (!el) continue;
@@ -1172,6 +1244,7 @@ class DatumBrainView extends ItemView {
           el.style.transform = "translate(" + ((this.pv.x * .5 + .5) * this.W).toFixed(1) + "px," +
             ((-this.pv.y * .5 + .5) * this.H).toFixed(1) + "px) translate(-50%,-50%)";
           el.style.opacity = this.focusedGroup == null ? ".6" : (s.g === this.focusedGroup ? ".9" : ".08");
+          el.style.pointerEvents = "auto";
         }
       }
     }
