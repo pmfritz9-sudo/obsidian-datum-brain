@@ -1,0 +1,4 @@
+# The gate compares main.js with a fresh build byte for byte, and styles.css is built from
+# src/styles.css. Keep every text file on LF so a checkout with CRLF conversion does not
+# fail the gate on an untouched tree.
+* text=auto eol=lf

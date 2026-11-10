@@ -88,7 +88,8 @@ npm run verify          # build + boundary gate + outputs-match-source
     the listed forms of network call, remote URL literal, raw-HTML sink and dynamic code, and
     the built `main.js` for the network calls and raw-HTML sinks;
   - skips editor leftovers in `src/` that esbuild does not bundle (`.DS_Store`, `*.swp`,
-    `*.swo`, `*~`, `#*#`, `.#*`), and fails on any other file there that is not `.css`;
+    `*.swo`, `*~`, `#*#`, `.#*`), and fails on any other file there that is neither one of
+    those source types nor `.css`;
   - scans every `.css` under `src/` and the generated `styles.css` as whole texts, comments
     included, and fails on `@import`, a `url()` that is not a `data:` URI, an `http:` or
     `https:` literal, `//` right after an opening quote or bracket, any backslash, and any
