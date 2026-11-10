@@ -14,9 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # the job only reads the repository: do not leave the token in .git/config
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: npm
-      - run: npm ci --no-audit --no-fund
+      # no install scripts: the build needs none (esbuild runs from its platform package)
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run verify
