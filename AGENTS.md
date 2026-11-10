@@ -17,7 +17,10 @@ change is proven. Keep it under 150 lines; when it is wrong, fix it in the same 
   dust, top-level folders are "systems". It is desktop only.
 - It is a **local, read-only viewer**. It builds its graph from Obsidian's own link index,
   renders notes with Obsidian's markdown renderer, and opens notes in the editor. It never
-  writes to the vault and it makes no network request.
+  writes to the vault, and its own code and styles make no network request.
+- The **reader shows a note as Obsidian renders it**, unfiltered: a note that embeds remote
+  images or web content loads them exactly as Obsidian's reading view would, and code blocks
+  handled by other plugins run.
 - It is **not an AI feature and not a knowledge base**. It calls no model, holds no
   knowledge of its own, has no account, and stores nothing. The shared name means this
   viewer only: do not add product-runtime behaviour (model calls, connectors, sync,
@@ -72,8 +75,10 @@ npm run verify          # build + boundary gate + outputs-match-source
 
 - `npm run build` bundles `main.js` and generates `styles.css`. The build is deterministic:
   the same source and lockfile produce the same bytes.
-- `npm run gate` fails with `file:line` on any network call or raw-HTML sink in `src/`, any
-  remote reference in `styles.css`, and any network primitive in the built `main.js`.
+- `npm run gate` is a pattern check. It fails with `file:line` on the listed forms of network
+  call and raw-HTML sink in every source file under `src/` and in the built `main.js`, on any
+  file type in `src/` it does not scan, and on any remote reference in the stylesheets. Its
+  pass message lists what was checked; a form it does not list passes, so review still decides.
 - `npm run verify` then fails if `main.js` or `styles.css` differ from what is staged or
   committed — stage the rebuilt outputs before you run it.
 - A change is ready only when the **Quality** workflow is green on the exact head you are

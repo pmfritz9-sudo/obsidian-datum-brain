@@ -20,7 +20,11 @@ Or with [BRAT](https://github.com/TfTHacker/obsidian42-brat): add this repo as a
 
 ## Privacy
 
-Datum Brain is a local, read-only viewer. It makes no network request, sends no telemetry, calls no AI model, and never writes to your vault. The three typefaces it uses (Syne, DM Sans, DM Mono — SIL Open Font License 1.1, see `licenses/`) are embedded in `styles.css` rather than fetched from a font CDN, so opening the view tells no third party anything. A build gate enforces this on every change.
+Datum Brain is a local, read-only viewer. The plugin's own code and styles make no network request, send no telemetry, call no AI model, and never write to your vault. The three typefaces it uses (Syne, DM Sans, DM Mono — SIL Open Font License 1.1, see `licenses/`) are embedded in `styles.css` rather than fetched from a font CDN, so the plugin itself contacts no one.
+
+The reader is the one place where a note's own content decides what loads. It shows the note you select through Obsidian's markdown renderer and does not filter it: a note that embeds remote images or web content loads them exactly as Obsidian's reading view would, and code blocks handled by your other plugins run.
+
+A build gate checks the plugin's source and the built `main.js` for the common forms of network calls and raw-HTML sinks on every change. It is a pattern check, not a proof.
 
 If a note cannot be read, the reader says so instead of showing an empty page.
 
@@ -29,7 +33,7 @@ If a note cannot be read, the reader says so instead of showing an empty page.
 ```bash
 npm ci
 npm run build    # bundles src/main.js + three.js -> main.js, and src/styles.css + typefaces -> styles.css
-npm run verify   # build + boundary gate (no network egress, no raw-HTML sinks) + outputs match source
+npm run verify   # build + boundary gate (pattern checks for network calls and raw-HTML sinks) + outputs match source
 ```
 
 `main.js` and `styles.css` in the repository root are build outputs — edit `src/` and rebuild. Contributor rules are in [AGENTS.md](AGENTS.md).
