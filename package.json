@@ -4,7 +4,9 @@
   "description": "Cosmic-organism 3D graph view for Obsidian",
   "main": "main.js",
   "scripts": {
-    "build": "node esbuild.config.mjs"
+    "build": "node esbuild.config.mjs",
+    "gate": "node scripts/assert-boundaries.mjs",
+    "verify": "npm run build && npm run gate && git diff --exit-code -- main.js styles.css"
   },
   "keywords": ["obsidian", "graph", "three.js", "visualization"],
   "author": "Paul Fritz",

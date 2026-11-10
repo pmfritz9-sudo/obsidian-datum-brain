@@ -1,0 +1,22 @@
+name: Quality
+
+# The gate for every change: pinned install, deterministic build, boundary assertions,
+# and proof that the committed main.js / styles.css are what the source produces.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run verify
