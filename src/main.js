@@ -4,10 +4,13 @@
  * procedural shader planets for hub notes, instanced lit spheres for notes,
  * twinkling dust for orphans, dark-glass chrome.
  *
- * Live data: graph derives from metadataCache.resolvedLinks, so it always
- * reflects the vault. Click a node to read it; "Open note" jumps to the editor.
+ * Live data: the graph derives from metadataCache.resolvedLinks. It is rebuilt when notes or links are
+ * added, removed or renamed (about three seconds after Obsidian's link index settles, and only while the
+ * view is shown) and when Sync is pressed. An edit that changes no link rebuilds nothing: the note's date
+ * and size follow it, and so does its text if the note is open in the reader.
+ * Click a node to read it; "Open note" jumps to the editor.
  */
-import { Plugin, ItemView, MarkdownRenderer, Component, debounce, getLinkpath } from "obsidian";
+import { Plugin, ItemView, MarkdownRenderer, Component, Notice, debounce, getLinkpath } from "obsidian";
 import * as T from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -64,6 +67,10 @@ class DatumBrainView extends ItemView {
     this._closed = false;
     this._selSeq = 0;
     this._readerComp = null;
+    this._readerStat = null;
+    this._dirty = false;
+    this._ptr = null;
+    this._rafWin = null;
   }
   getViewType(){ return VIEW_TYPE; }
   getDisplayText(){ return "Datum Brain"; }
@@ -78,7 +85,7 @@ class DatumBrainView extends ItemView {
     try { this.buildScene(); }
     catch (e){ this.failOpen(e); return; }
     this.startLoop();
-    /* live topology sync: rebuild (debounced) when the vault's link graph changes */
+    /* live sync (debounced): rebuild when the vault's link graph changes, otherwise follow edits (see resync) */
     this._resync = debounce(() => this.resync(true), 3000, true);
     this.registerEvent(this.app.metadataCache.on("resolved", this._resync));
   }
@@ -87,7 +94,8 @@ class DatumBrainView extends ItemView {
     /* a debounced resync may still be pending: it must not rebuild a closed view */
     this._closed = true;
     if (this._resync && this._resync.cancel) this._resync.cancel();
-    cancelAnimationFrame(this._raf);
+    /* the pending frame was requested from the window that owns the view: that window cancels it */
+    if (this._rafWin) this._rafWin.cancelAnimationFrame(this._raf);
     this._selSeq++;
     this.teardownScene();
     this.contentEl.empty();
@@ -317,7 +325,8 @@ class DatumBrainView extends ItemView {
     this.focusedGroup = g;
     this.controls.autoRotate = false;
     const d = Math.max(70, s.r * 2.7);
-    this.flyTarget = { tx: s.cx, ty: 0, tz: s.cz, cx: s.cx, cy: d * .8, cz: s.cz + d * .75 };
+    /* cluster / note: what a flight is aimed at, by name, so that a rebuild can aim it again (see resync) */
+    this.flyTarget = { cluster: this.groups[g], tx: s.cx, ty: 0, tz: s.cz, cx: s.cx, cy: d * .8, cz: s.cz + d * .75 };
     this.crumb(g);
   }
   /* HUD breadcrumb: the name of the focused system */
@@ -491,10 +500,15 @@ class DatumBrainView extends ItemView {
       /* a heading or block link resolves by its link path; an empty path is a link into the current note */
       const lp = getLinkpath(href), cur = this.selected;
       const f = lp ? this.app.metadataCache.getFirstLinkpathDest(lp, cur ? cur.id : "") : (cur && cur.file);
-      if (!f) return;
+      /* a link that leads nowhere says so. The link text comes from the note: it is shown as plain text */
+      if (!f){ new Notice("Link target not found: " + href); return; }
       if (e.metaKey || e.ctrlKey){ this.app.workspace.getLeaf("tab").openFile(f); return; }
       const n = this.byId.get(f.path);
-      if (n) this.select(n); else this.app.workspace.getLeaf("tab").openFile(f);
+      if (!n){ this.app.workspace.getLeaf("tab").openFile(f); return; }
+      /* a link into the note being read goes to its heading: the note is not rendered again and the camera stays */
+      const hash = href.indexOf("#");
+      if (n === cur && hash >= 0) this.scrollToAnchor(href.slice(hash + 1));
+      else this.select(n);
     });
     this.registerDomEvent(this.rBacks, "click", (e) => {
       const el = e.target.closest("[data-id]");
@@ -556,6 +570,16 @@ class DatumBrainView extends ItemView {
     this.resultsEl.empty(); this.resultsEl.style.display = "none";
   }
 
+  /* a rebuild replaces the graph the matches came from: the query still in the box is searched again, keeping the
+     highlighted row (by note) and whether the list was open */
+  redoSearch(){
+    const open = this.resultsEl.style.display === "block", cur = this.curMatches[this.selIdx];
+    this.doSearch(this.searchEl.value);
+    this.selIdx = cur ? this.curMatches.findIndex((n) => n.id === cur.id) : -1;
+    [...this.resultsEl.children].forEach((c, i) => c.classList.toggle("db-sel", i === this.selIdx));
+    if (!open) this.resultsEl.style.display = "none";
+  }
+
   doSearch(q){
     q = q.trim().toLowerCase();
     if (!q){ this.clearSearch(); return; }
@@ -583,12 +607,26 @@ class DatumBrainView extends ItemView {
     this.resultsEl.style.display = this.curMatches.length ? "block" : "none";
   }
 
-  async select(n, keepCam){
+  async select(n){
     /* each selection is numbered: a slower, older read must never write into the reader */
     const seq = ++this._selSeq;
     this.selected = n;
+    /* hover belongs to the pointer: it does not outlive a change of selection (the next pointer move sets it again) */
+    this.setHover(null);
     if (this.layoutMode === "radial" && this.focusedGroup != null && n.g !== this.focusedGroup){ this.focusedGroup = n.g; this.crumb(n.g); }
     this.spawnParticles(n);
+    this.readerHead(n);
+    this.rBody.empty();
+    this.rBody.scrollTop = 0;
+    this.rBacks.scrollTop = 0;
+    this.readerEl.classList.add("db-open");
+    this.flyTo(n);
+    await this.renderNote(n, seq);
+  }
+
+  /* the reader's own chrome for note n: title, system, path, date, backlinks. Shown again for the same note
+     (after an edit or a rebuild), the backlink list keeps its scroll position */
+  readerHead(n){
     this.rTitle.setText(n.t);
     const dt = new Date(n.m).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
     this.rMeta.empty();
@@ -596,22 +634,29 @@ class DatumBrainView extends ItemView {
     sys.style.color = gcol(n.g);
     this.rMeta.createSpan({ text: "· " + n.id });
     this.rMeta.createSpan({ text: "· " + dt });
-    const bl = this.backlinks.get(n.id) || [];
+    const bl = this.backlinks.get(n.id) || [], top = this.rBacks.scrollTop;
     this.rBacks.empty();
     this.rBacks.createDiv({ cls: "db-bk", text: bl.length ? `↩ ${bl.length} backlink${bl.length > 1 ? "s" : ""}` : "no backlinks" });
     for (const id of bl){
       const d = this.rBacks.createDiv({ cls: "db-b", text: this.byId.get(id).t });
       d.dataset.id = id;
     }
-    this.rBody.empty();
-    this.rBody.scrollTop = 0;
-    /* rendered markdown owns a component of its own, released on the next selection */
+    this.rBacks.scrollTop = top;
+  }
+
+  /* reads note n and renders it into the reader; seq is the selection number it belongs to. If a render of the note
+     is already on show (the note was edited, or Sync was pressed) it stays until the new one is ready and is then
+     replaced at the same scroll position */
+  async renderNote(n, seq){
+    const stale = [...this.rBody.children];
+    /* rendered markdown owns a component of its own, released before the next render and when the reader closes */
     if (this._readerComp){ this.removeChild(this._readerComp); this._readerComp = null; }
-    this.readerEl.classList.add("db-open");
-    if (!keepCam) this.flyTo(n);
+    this._readerStat = null;
     if (!n.file) return;
     const comp = this._readerComp = this.addChild(new Component());
     const doc = this.rBody.createDiv({ cls: "db-rdoc" });
+    /* what this render is a render of, taken before the read: a later edit shows as a different mtime or size */
+    this._readerStat = { mtime: n.file.stat.mtime, size: n.file.stat.size };
     try {
       const md = await this.app.vault.cachedRead(n.file);
       if (seq !== this._selSeq) return;
@@ -626,10 +671,41 @@ class DatumBrainView extends ItemView {
       err.createDiv({ text: (e && e.message) ? e.message : String(e) });
       err.createDiv({ cls: "db-rerr-hint", text: "The note is not empty \u2014 the read failed. Use Sync, or Open note to try it in the editor." });
     }
+    /* a newer selection or render owns the reader now, and removes this document with the rest */
+    if (seq !== this._selSeq || !stale.length) return;
+    const top = this.rBody.scrollTop;
+    stale.forEach((el) => el.remove());
+    this.rBody.scrollTop = top;
+  }
+
+  /* has the note changed on disk since the reader rendered it? */
+  noteChanged(n){
+    const was = this._readerStat, now = n.file && n.file.stat;
+    return !!now && (!was || was.mtime !== now.mtime || was.size !== now.size);
+  }
+
+  /* a link into the open note: scroll the reader to the heading it names. Obsidian's renderer marks a heading with
+     data-heading; the heading's own text is the fallback. A block reference (^id) leaves no mark in the rendered
+     note, so the reader stays where it is */
+  scrollToAnchor(sub){
+    const norm = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    const want = norm(sub.split("#").pop());
+    if (!want || sub.startsWith("^")) return;
+    const hs = [...this.rBody.querySelectorAll("h1,h2,h3,h4,h5,h6")];
+    const h = hs.find((x) => norm(x.getAttribute("data-heading")) === want) || hs.find((x) => norm(x.textContent) === want);
+    if (!h){ new Notice("Heading not found in this note: " + sub); return; }
+    this.rBody.scrollTop += h.getBoundingClientRect().top - this.rBody.getBoundingClientRect().top - 8;
+  }
+
+  /* the node under the pointer (null: none), and the cursor that says so */
+  setHover(n){
+    this.hover = (n && n.kind !== "core") ? n : null;
+    if (this.renderer) this.renderer.domElement.style.cursor = n ? "pointer" : "grab";
   }
 
   clearSel(){
     this.selected = null; this.killParticles();
+    this.setHover(null);
     this.closeReader();
   }
 
@@ -637,14 +713,20 @@ class DatumBrainView extends ItemView {
   closeReader(){
     this._selSeq++;
     if (this._readerComp){ this.removeChild(this._readerComp); this._readerComp = null; }
+    this._readerStat = null;
     this.rTitle.empty(); this.rMeta.empty(); this.rBody.empty(); this.rBacks.empty();
     this.readerEl.classList.remove("db-open");
   }
 
-  /* auto: the debounced vault event, skipped while the topology is unchanged; the Sync button always rebuilds */
+  /* auto: the debounced vault event. It rebuilds the scene only if the topology changed, and never while the view
+     is hidden; without a rebuild it still follows edits (refreshFiles). The Sync button always rebuilds, and reads
+     the open note again */
   async resync(auto){
     if (this._closed || !this.renderer) return;
-    if (auto && this.topoSig() === this._topo) return;
+    /* a hidden view rebuilds nothing: the loop applies what it missed, once, when the view is shown again */
+    if (auto && !this.containerEl.isShown()){ this._dirty = true; return; }
+    this._dirty = false;
+    if (auto && this.topoSig() === this._topo){ this.refreshFiles(); return; }
     const selId = this.selected ? this.selected.id : null;
     const cam = this.camera ? this.camera.position.clone() : null;
     const tgt = this.controls ? this.controls.target.clone() : null;
@@ -653,16 +735,40 @@ class DatumBrainView extends ItemView {
     this.teardownScene();
     this.labelWrap.empty();
     this.buildGraph();
-    this.clearSearch();
+    this.redoSearch();
     this.buildTypeRows();
     this.buildChips();
     this.updateStats();
     try { this.buildScene(); }
     catch (e){ this.failOpen(e); return; }
-    /* a flight in progress carries on: a home flight still has to arrive to turn auto-rotation back on */
-    if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); this.controls.autoRotate = rot; this.flyTarget = fly; }
-    if (selId && this.byId.has(selId)) this.select(this.byId.get(selId), true);
-    else if (selId) this.closeReader();
+    if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); this.controls.autoRotate = rot; }
+    /* a flight in progress is aimed again, at where its goal is in the new layout, and dropped if the goal is gone.
+       A home flight has to carry on: arriving is what turns auto-rotation back on */
+    if (fly && fly.home) this.goHome();
+    else if (fly && fly.cluster != null) this.enterCluster(this.groups.indexOf(fly.cluster));
+    else if (fly && this.byId.has(fly.note)) this.flyTo(this.byId.get(fly.note));
+    const sel = selId ? this.byId.get(selId) : null;
+    if (!sel){ if (selId) this.closeReader(); return; }
+    /* the reader stays open on its note, in the new graph: its chrome is redone (systems and backlinks may differ),
+       the rendered note stays as it is, scroll position included, unless the note changed or Sync asked for it */
+    this.selected = sel;
+    this.spawnParticles(sel);
+    this.readerHead(sel);
+    if (!auto || this.noteChanged(sel)) this.renderNote(sel, ++this._selSeq);
+  }
+
+  /* a vault event that left the topology alone: nothing is rebuilt. Nodes take the vault's current file objects
+     (a note deleted and created again at the same path is a new one) with their date and size, and the open note
+     is read again, in place, if it was edited since the reader rendered it */
+  refreshFiles(){
+    for (const f of this.app.vault.getMarkdownFiles()){
+      const n = this.byId.get(f.path);
+      if (!n) continue;
+      n.file = f; n.m = f.stat.mtime; n.w = Math.round((f.stat.size || 0) / 6);
+      if (n.halo) n.halo.scale.setScalar(this.radius(n) * 2.8);
+    }
+    const n = this.selected;
+    if (n && this.noteChanged(n)){ this.readerHead(n); this.renderNote(n, ++this._selSeq); }
   }
 
   /* =================== scene =================== */
@@ -905,7 +1011,15 @@ class DatumBrainView extends ItemView {
     rc.params.Sprite = { threshold: 2 };
     let downAt = null;
     const cvs = renderer.domElement;
-    const onDown = (e) => { downAt = { x: e.clientX, y: e.clientY }; };
+    /* the user's own orbit, pan or zoom always wins over a camera flight; an interrupted home flight counts as arrived.
+       A click is not such a gesture, and OrbitControls reports "start" for every pointerdown, so the gesture is
+       recognised here: a drag past the click threshold, a second finger, or the wheel */
+    const endFlight = () => {
+      if (!this.flyTarget) return;
+      if (this.flyTarget.home) controls.autoRotate = true;
+      this.flyTarget = null;
+    };
+    const onDown = (e) => { downAt = { x: e.clientX, y: e.clientY }; if (!e.isPrimary) endFlight(); };
     const onUp = (e) => {
       if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5){ downAt = null; return; }
       downAt = null;
@@ -915,25 +1029,18 @@ class DatumBrainView extends ItemView {
       if (this.layoutMode === "radial" && n.kind === "hub" && this.focusedGroup !== n.g){ this.enterCluster(n.g); return; }
       this.select(n);
     };
-    let hoverTick = 0;
+    /* hover: only the pointer's last position is kept, and frame() looks it up once (see there) */
     const onMove = (e) => {
-      if (++hoverTick % 3) return;
-      const n = this.castAt(e);
-      if (n !== this.hover){ this.hover = (n && n.kind !== "core") ? n : null; cvs.style.cursor = n ? "pointer" : "grab"; }
+      this._ptr = { clientX: e.clientX, clientY: e.clientY };
+      if (downAt && e.buttons && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) endFlight();
     };
     /* the pointer left the canvas (for the reader, the rail, another pane): nothing is hovered any more */
-    const onLeave = () => { this.hover = null; cvs.style.cursor = "grab"; };
+    const onLeave = () => { this._ptr = null; this.setHover(null); };
     cvs.addEventListener("pointerdown", onDown);
     cvs.addEventListener("pointerup", onUp);
     cvs.addEventListener("pointermove", onMove);
     cvs.addEventListener("pointerleave", onLeave);
-    /* the user's own orbit, pan or zoom always wins over a camera flight; an interrupted home flight counts as arrived */
-    const onStart = () => {
-      if (!this.flyTarget) return;
-      if (this.flyTarget.home) controls.autoRotate = true;
-      this.flyTarget = null;
-    };
-    controls.addEventListener("start", onStart);
+    cvs.addEventListener("wheel", endFlight, { passive: true });
 
     /* zoom label */
     this._lastZ = "";
@@ -961,7 +1068,7 @@ class DatumBrainView extends ItemView {
       cvs.removeEventListener("pointerup", onUp);
       cvs.removeEventListener("pointermove", onMove);
       cvs.removeEventListener("pointerleave", onLeave);
-      controls.removeEventListener("start", onStart);
+      cvs.removeEventListener("wheel", endFlight);
       controls.removeEventListener("change", onCtl);
     });
   }
@@ -1060,7 +1167,7 @@ class DatumBrainView extends ItemView {
     this.controls.autoRotate = false;
     const dist = Math.max(46, this.radius(n) * 11);
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
-    this.flyTarget = { tx: n.x, ty: n.y, tz: n.z,
+    this.flyTarget = { note: n.id, tx: n.x, ty: n.y, tz: n.z,
       cx: n.x + dir.x * dist, cy: n.y + dir.y * dist, cz: n.z + dir.z * dist };
   }
   goHome(){
@@ -1074,14 +1181,21 @@ class DatumBrainView extends ItemView {
 
   startLoop(){
     const step = () => {
-      this._raf = requestAnimationFrame(step);
+      /* the window that owns the view drives its loop: a pop-out window has a frame clock of its own. It is looked
+         up for every frame and remembered, so that onClose cancels on the window that holds the request */
+      const win = this._rafWin = this.containerEl.ownerDocument.defaultView || window;
+      this._raf = win.requestAnimationFrame(step);
       if (!this.renderer || !this.containerEl.isShown()) return;
+      /* vault events that came while the view was hidden are applied now that it is shown again (see resync) */
+      if (this._dirty){ this.resync(true); if (!this.renderer) return; }
       this.frame();
     };
     step();
   }
 
   frame(){
+    /* hover follows the pointer's last position, looked up once a frame: where the pointer comes to rest is never skipped */
+    if (this._ptr){ const at = this._ptr; this._ptr = null; this.setHover(this.castAt(at)); }
     const t = this.clock.getElapsedTime();
     if (this.layoutMode === "radial"){
       for (const n of this.ALL){
