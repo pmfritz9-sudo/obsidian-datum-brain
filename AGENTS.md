@@ -18,9 +18,10 @@ change is proven. Keep it under 150 lines; when it is wrong, fix it in the same 
 - It is a **local, read-only viewer**. It builds its graph from Obsidian's own link index,
   renders notes with Obsidian's markdown renderer, and opens notes in the editor. It never
   writes to the vault, and its own code and styles make no network request.
-- The **reader shows a note as Obsidian renders it**, unfiltered: a note that embeds remote
-  images or web content loads them exactly as Obsidian's reading view would, and code blocks
-  handled by other plugins run.
+- The **reader hands a note to Obsidian's markdown renderer, unfiltered**: remote images or
+  web embeds in a note are requested when the note is shown, and again when the reader
+  re-renders it (after the note changes, or when Sync is pressed). Code blocks handled by
+  other plugins run.
 - It is **not an AI feature and not a knowledge base**. It calls no model, holds no
   knowledge of its own, has no account, and stores nothing. The shared name means this
   viewer only: do not add product-runtime behaviour (model calls, connectors, sync,
@@ -32,8 +33,9 @@ change is proven. Keep it under 150 lines; when it is wrong, fix it in the same 
 | Path | What |
 |------|------|
 | `src/main.js` | The whole plugin: graph build, layout, three.js scene, reader, search |
-| `src/styles.css` | Authored styles. No `@import`, no external `url()` |
+| `src/styles.css` | Authored styles. No `@import`, no remote URL, no backslash escape |
 | `scripts/build-styles.mjs` | Generates root `styles.css` = embedded typefaces + `src/styles.css` |
+| `scripts/build-options.mjs` | The esbuild options for `main.js`, shared by the build and the gate |
 | `scripts/assert-boundaries.mjs` | The boundary gate (section 4) |
 | `esbuild.config.mjs` | Bundles `src/main.js` + three.js into root `main.js`, then builds styles |
 | `main.js`, `styles.css` (root) | **Build outputs**, committed because Obsidian and BRAT install them. Never hand-edit |
@@ -69,16 +71,26 @@ change is proven. Keep it under 150 lines; when it is wrong, fix it in the same 
 
 ```bash
 nvm use                 # Node from .nvmrc
-npm ci --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund   # the install CI runs
 npm run verify          # build + boundary gate + outputs-match-source
 ```
 
 - `npm run build` bundles `main.js` and generates `styles.css`. The build is deterministic:
   the same source and lockfile produce the same bytes.
-- `npm run gate` is a pattern check. It fails with `file:line` on the listed forms of network
-  call and raw-HTML sink in every source file under `src/` and in the built `main.js`, on any
-  file type in `src/` it does not scan, and on any remote reference in the stylesheets. Its
-  pass message lists what was checked; a form it does not list passes, so review still decides.
+- `npm run gate` is a pattern check that fails with `file:line`. What it does:
+  - asks esbuild which files `main.js` is bundled from, and fails on any that is neither in
+    this project's `node_modules` nor under `src/`;
+  - scans every source file under `src/` (`.js .mjs .cjs .jsx .ts .tsx`), line by line, for
+    the listed forms of network call, remote URL literal, raw-HTML sink and dynamic code, and
+    the built `main.js` for the network calls and raw-HTML sinks;
+  - skips editor leftovers in `src/` that esbuild does not bundle (`.DS_Store`, `*.swp`,
+    `*.swo`, `*~`, `#*#`, `.#*`), and fails on any other file there that is not `.css`;
+  - scans every `.css` under `src/` and the generated `styles.css` as whole texts, comments
+    included, and fails on `@import`, a `url()` that is not a `data:` URI, an `http:` or
+    `https:` literal, `//` right after an opening quote or bracket, and any backslash.
+
+  Its pass message lists what was checked; a form it does not list passes, so review still
+  decides.
 - `npm run verify` then fails if `main.js` or `styles.css` differ from what is staged or
   committed — stage the rebuilt outputs before you run it.
 - A change is ready only when the **Quality** workflow is green on the exact head you are

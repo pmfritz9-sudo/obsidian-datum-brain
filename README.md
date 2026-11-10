@@ -2,7 +2,7 @@
 
 A cosmic-organism 3D graph of your Obsidian vault. Your MOC hubs become procedural shader planets, notes become lit spheres sized by connectivity and length, orphans drift as twinkling dust — all orbiting a breathing gold core, wrapped in a warped-noise nebula with WebGL bloom.
 
-Live data: the graph is built from Obsidian's own link index, so it always reflects your vault. No exports, no rebuild step.
+Live data: the graph is built from Obsidian's own link index — no exports, no rebuild step. It follows your vault while the view is on screen, about three seconds after Obsidian has re-indexed a change. When notes or links are added, removed or renamed, the graph is rebuilt. An edit that changes no link rebuilds nothing: the note's date and sphere size follow it, and if the note is open in the reader its text is read again in place, at your scroll position. A hidden view catches up when you return to it, and **Sync** rebuilds the graph and re-reads the open note whenever you press it.
 
 ## Features
 
@@ -22,16 +22,16 @@ Or with [BRAT](https://github.com/TfTHacker/obsidian42-brat): add this repo as a
 
 Datum Brain is a local, read-only viewer. The plugin's own code and styles make no network request, send no telemetry, call no AI model, and never write to your vault. The three typefaces it uses (Syne, DM Sans, DM Mono — SIL Open Font License 1.1, see `licenses/`) are embedded in `styles.css` rather than fetched from a font CDN, so the plugin itself contacts no one.
 
-The reader is the one place where a note's own content decides what loads. It shows the note you select through Obsidian's markdown renderer and does not filter it: a note that embeds remote images or web content loads them exactly as Obsidian's reading view would, and code blocks handled by your other plugins run.
+The reader is the one place where a note's own content decides what loads. It hands the note you select to Obsidian's markdown renderer and does not filter the result: remote images or web embeds in a note are requested when the note is shown, and again whenever the reader re-renders it — after the note changes, or when you press Sync. Code blocks handled by your other plugins run.
 
-A build gate checks the plugin's source and the built `main.js` for the common forms of network calls and raw-HTML sinks on every change. It is a pattern check, not a proof.
+A build gate checks, on every change, the plugin's source, its stylesheets and the built `main.js` for the common forms of network calls, remote references and raw-HTML sinks, and that `main.js` is bundled only from `src/` and the installed packages. It is a pattern check, not a proof.
 
 If a note cannot be read, the reader says so instead of showing an empty page.
 
 ## Build from source
 
 ```bash
-npm ci
+npm ci --ignore-scripts --no-audit --no-fund   # the install CI runs: pinned by package-lock.json, no install scripts
 npm run build    # bundles src/main.js + three.js -> main.js, and src/styles.css + typefaces -> styles.css
 npm run verify   # build + boundary gate (pattern checks for network calls and raw-HTML sinks) + outputs match source
 ```
