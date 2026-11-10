@@ -24,7 +24,7 @@ Datum Brain is a local, read-only viewer. The plugin's own code and styles make 
 
 The reader is the one place where a note's own content decides what loads. It hands the note you select to Obsidian's markdown renderer and does not filter the result: remote images or web embeds in a note are requested when the note is shown, and again whenever the reader re-renders it — after the note changes, or when you press Sync. Code blocks handled by your other plugins run.
 
-A build gate checks, on every change, the plugin's source, its stylesheets and the built `main.js` for the common forms of network calls, remote references and raw-HTML sinks, and that `main.js` is bundled only from `src/` and the installed packages. It is a pattern check, not a proof.
+A build gate checks, on every change, the plugin's source, its stylesheets and the built `main.js` for the common forms of network calls, remote references and raw-HTML sinks, and that `main.js` is, byte for byte, what the build bundles from `src/` and the installed packages, with no build option that adds text of its own. It is a pattern check, not a proof.
 
 If a note cannot be read, the reader says so instead of showing an empty page.
 

@@ -33,9 +33,9 @@ change is proven. Keep it under 150 lines; when it is wrong, fix it in the same 
 | Path | What |
 |------|------|
 | `src/main.js` | The whole plugin: graph build, layout, three.js scene, reader, search |
-| `src/styles.css` | Authored styles. No `@import`, no remote URL, no backslash escape |
+| `src/styles.css` | Authored styles. No `@import`, no remote URL, no backslash escape, no tab |
 | `scripts/build-styles.mjs` | Generates root `styles.css` = embedded typefaces + `src/styles.css` |
-| `scripts/build-options.mjs` | The esbuild options for `main.js`, shared by the build and the gate |
+| `scripts/build-options.mjs` | The esbuild options for `main.js`, shared by the build and the gate; only options the gate lists |
 | `scripts/assert-boundaries.mjs` | The boundary gate (section 4) |
 | `esbuild.config.mjs` | Bundles `src/main.js` + three.js into root `main.js`, then builds styles |
 | `main.js`, `styles.css` (root) | **Build outputs**, committed because Obsidian and BRAT install them. Never hand-edit |
@@ -62,8 +62,9 @@ change is proven. Keep it under 150 lines; when it is wrong, fix it in the same 
 7. **Outputs match source.** `main.js` and `styles.css` are rebuilt and committed together
    with the source change that produced them. Dependencies are pinned by
    `package-lock.json`; install with `npm ci`.
-8. **Release what you open.** Observers, listeners, WebGL contexts and rendered-markdown
-   components are released on resync and on close. A closed view rebuilds nothing.
+8. **Release what you open.** Observers, listeners, timers, WebGL contexts and
+   rendered-markdown components are released on resync and on close. A closed view rebuilds
+   nothing.
 9. **One version, three files.** `manifest.json`, `package.json` and `versions.json` move
    together. The owner cuts releases and tags.
 
@@ -79,7 +80,10 @@ npm run verify          # build + boundary gate + outputs-match-source
   the same source and lockfile produce the same bytes.
 - `npm run gate` is a pattern check that fails with `file:line`. What it does:
   - asks esbuild which files `main.js` is bundled from, and fails on any that is neither in
-    this project's `node_modules` nor under `src/`;
+    this project's `node_modules` nor under `src/`, on any option in
+    `scripts/build-options.mjs` other than the plain ones it lists (a banner, footer, define
+    or plugin adds text that is no file), and on a `main.js` that is not that bundle byte for
+    byte (one not rebuilt after a source change included);
   - scans every source file under `src/` (`.js .mjs .cjs .jsx .ts .tsx`), line by line, for
     the listed forms of network call, remote URL literal, raw-HTML sink and dynamic code, and
     the built `main.js` for the network calls and raw-HTML sinks;
@@ -87,7 +91,8 @@ npm run verify          # build + boundary gate + outputs-match-source
     `*.swo`, `*~`, `#*#`, `.#*`), and fails on any other file there that is not `.css`;
   - scans every `.css` under `src/` and the generated `styles.css` as whole texts, comments
     included, and fails on `@import`, a `url()` that is not a `data:` URI, an `http:` or
-    `https:` literal, `//` right after an opening quote or bracket, and any backslash.
+    `https:` literal, `//` right after an opening quote or bracket, any backslash, and any
+    control character other than a line break (a tab is one).
 
   Its pass message lists what was checked; a form it does not list passes, so review still
   decides.
