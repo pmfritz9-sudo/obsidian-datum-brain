@@ -68,9 +68,11 @@ class DatumBrainView extends ItemView {
     this._selSeq = 0;
     this._readerComp = null;
     this._readerStat = null;
+    this._readerNext = null;
     this._dirty = false;
     this._ptr = null;
     this._rafWin = null;
+    this._loopWatch = 0;
   }
   getViewType(){ return VIEW_TYPE; }
   getDisplayText(){ return "Datum Brain"; }
@@ -94,6 +96,7 @@ class DatumBrainView extends ItemView {
     /* a debounced resync may still be pending: it must not rebuild a closed view */
     this._closed = true;
     if (this._resync && this._resync.cancel) this._resync.cancel();
+    window.clearInterval(this._loopWatch);
     /* the pending frame was requested from the window that owns the view: that window cancels it */
     if (this._rafWin) this._rafWin.cancelAnimationFrame(this._raf);
     this._selSeq++;
@@ -648,13 +651,16 @@ class DatumBrainView extends ItemView {
      is already on show (the note was edited, or Sync was pressed) it stays until the new one is ready and is then
      replaced at the same scroll position */
   async renderNote(n, seq){
+    /* a render still on its way is superseded by this one: its document leaves the reader now, so that the note is
+       never on show twice (whatever that render still writes goes into the removed element) */
+    if (this._readerNext){ this._readerNext.remove(); this._readerNext = null; }
     const stale = [...this.rBody.children];
     /* rendered markdown owns a component of its own, released before the next render and when the reader closes */
     if (this._readerComp){ this.removeChild(this._readerComp); this._readerComp = null; }
     this._readerStat = null;
     if (!n.file) return;
     const comp = this._readerComp = this.addChild(new Component());
-    const doc = this.rBody.createDiv({ cls: "db-rdoc" });
+    const doc = this._readerNext = this.rBody.createDiv({ cls: "db-rdoc" });
     /* what this render is a render of, taken before the read: a later edit shows as a different mtime or size */
     this._readerStat = { mtime: n.file.stat.mtime, size: n.file.stat.size };
     try {
@@ -671,8 +677,10 @@ class DatumBrainView extends ItemView {
       err.createDiv({ text: (e && e.message) ? e.message : String(e) });
       err.createDiv({ cls: "db-rerr-hint", text: "The note is not empty \u2014 the read failed. Use Sync, or Open note to try it in the editor." });
     }
-    /* a newer selection or render owns the reader now, and removes this document with the rest */
-    if (seq !== this._selSeq || !stale.length) return;
+    /* a newer selection or render owns the reader now, and has removed this document */
+    if (seq !== this._selSeq) return;
+    this._readerNext = null;
+    if (!stale.length) return;
     const top = this.rBody.scrollTop;
     stale.forEach((el) => el.remove());
     this.rBody.scrollTop = top;
@@ -713,7 +721,7 @@ class DatumBrainView extends ItemView {
   closeReader(){
     this._selSeq++;
     if (this._readerComp){ this.removeChild(this._readerComp); this._readerComp = null; }
-    this._readerStat = null;
+    this._readerStat = null; this._readerNext = null;
     this.rTitle.empty(); this.rMeta.empty(); this.rBody.empty(); this.rBacks.empty();
     this.readerEl.classList.remove("db-open");
   }
@@ -1024,10 +1032,17 @@ class DatumBrainView extends ItemView {
       if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5){ downAt = null; return; }
       downAt = null;
       const n = this.castAt(e);
-      if (!n){ this.clearSel(); return; }
+      if (!n){
+        /* the click lets go of the selected note: a flight still on its way to that note has lost its goal and ends
+           where it is. A home or cluster flight is not this click's business and carries on */
+        if (this.flyTarget && this.selected && this.flyTarget.note === this.selected.id) this.flyTarget = null;
+        this.clearSel(); return;
+      }
       if (n.kind === "core"){ this.exitCluster(); return; }
       if (this.layoutMode === "radial" && n.kind === "hub" && this.focusedGroup !== n.g){ this.enterCluster(n.g); return; }
       this.select(n);
+      /* select() drops the hover it finds; the pointer is on the node it has just clicked, so that node is hovered */
+      this.setHover(n);
     };
     /* hover: only the pointer's last position is kept, and frame() looks it up once (see there) */
     const onMove = (e) => {
@@ -1191,6 +1206,16 @@ class DatumBrainView extends ItemView {
       this.frame();
     };
     step();
+    /* Only the window a frame was requested from delivers it. When the view has moved to another window and the first
+       one is closed before its next frame (the last tab dragged out of a pop-out), or delivers none because it is
+       hidden, that frame never comes and the loop would stand still for good. A timer on the main window, which
+       outlives every pop-out, notices that the view's window is no longer the one holding the frame: it cancels
+       the frame left behind, so that there is never a second loop, and starts the loop from the view's window */
+    this._loopWatch = window.setInterval(() => {
+      const held = this._rafWin, id = this._raf;
+      if (this._closed || held === (this.containerEl.ownerDocument.defaultView || window)) return;
+      try { held.cancelAnimationFrame(id); } finally { step(); }
+    }, 250);
   }
 
   frame(){
