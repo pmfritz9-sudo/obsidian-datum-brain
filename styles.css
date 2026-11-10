@@ -116,3 +116,11 @@
 .db-root ::-webkit-scrollbar{width:9px}
 .db-root ::-webkit-scrollbar-thumb{background:rgba(224,169,78,.28);border-radius:5px}
 .db-root ::-webkit-scrollbar-track{background:transparent}
+
+.db-rerr{border:1px solid rgba(224,107,139,.45);background:rgba(224,107,139,.08);border-radius:10px;padding:12px 14px;
+  color:#f0c4d0;font-size:12.5px;line-height:1.55}
+.db-rerr b{display:block;color:#ffdbe5;font-weight:600;margin-bottom:4px}
+.db-rerr-hint{margin-top:8px;color:var(--db-muted)}
+.db-fatal{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:440px;padding:18px 20px;
+  border:1px solid rgba(224,107,139,.45);background:var(--db-glass2);border-radius:16px;color:#f0c4d0;font-size:13px;line-height:1.6}
+.db-fatal b{display:block;color:#ffdbe5;font-family:var(--db-serif);font-size:16px;margin-bottom:6px}

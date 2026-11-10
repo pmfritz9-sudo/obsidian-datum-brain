@@ -7,7 +7,7 @@
  * Live data: graph derives from metadataCache.resolvedLinks, so it always
  * reflects the vault. Click a node to read it; "Open note" jumps to the editor.
  */
-import { Plugin, ItemView, MarkdownRenderer, debounce } from "obsidian";
+import { Plugin, ItemView, MarkdownRenderer, Component, debounce } from "obsidian";
 import * as T from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -60,29 +60,49 @@ class DatumBrainView extends ItemView {
     super(leaf);
     this.navigation = true;
     this._raf = 0;
-    this._disposers = [];
+    this._sceneDisposers = [];
+    this._closed = false;
+    this._selSeq = 0;
+    this._readerComp = null;
   }
   getViewType(){ return VIEW_TYPE; }
   getDisplayText(){ return "Datum Brain"; }
   getIcon(){ return "orbit"; }
 
   async onOpen(){
+    this._closed = false;
     this.contentEl.empty();
     this.root = this.contentEl.createDiv({ cls: "db-root" });
     this.buildGraph();
     this.buildDom();
-    this.buildScene();
+    try { this.buildScene(); }
+    catch (e){ this.failOpen(e); return; }
     this.startLoop();
     /* live topology sync: rebuild (debounced) when the vault's link graph changes */
-    const resync = debounce(() => this.resync(), 3000, true);
-    this.registerEvent(this.app.metadataCache.on("resolved", resync));
+    this._resync = debounce(() => this.resync(), 3000, true);
+    this.registerEvent(this.app.metadataCache.on("resolved", this._resync));
   }
 
   async onClose(){
+    /* a debounced resync may still be pending: it must not rebuild a closed view */
+    this._closed = true;
+    if (this._resync && this._resync.cancel) this._resync.cancel();
     cancelAnimationFrame(this._raf);
-    this._disposers.forEach((fn) => { try { fn(); } catch(e){} });
-    this._disposers = [];
+    this._selSeq++;
+    this.teardownScene();
     this.contentEl.empty();
+  }
+
+  /* fail loud: a view that cannot start says so instead of showing an empty stage */
+  failOpen(e){
+    console.error("[datum-brain] could not start the 3D view", e);
+    this._closed = true;
+    this.teardownScene();
+    this.root.empty();
+    const box = this.root.createDiv({ cls: "db-fatal" });
+    box.createEl("b", { text: "Datum Brain could not start the 3D view." });
+    box.createDiv({ text: (e && e.message) ? e.message : String(e) });
+    box.createDiv({ text: "WebGL may be unavailable, for example when hardware acceleration is turned off. Fix that and reopen the view." });
   }
 
   /* =================== data: live from the vault =================== */
@@ -94,6 +114,9 @@ class DatumBrainView extends ItemView {
   }
 
   buildGraph(){
+    /* a rebuild keeps the user's filters and focus: systems are re-matched by name, since indices shift */
+    const hiddenNames = new Set([...(this.hiddenGroups || [])].map((i) => this.groups[i]));
+    const focusedName = (this.focusedGroup != null && this.groups) ? this.groups[this.focusedGroup] : null;
     const files = this.app.vault.getMarkdownFiles();
     const resolved = this.app.metadataCache.resolvedLinks;
     const byPath = new Map();
@@ -166,13 +189,14 @@ class DatumBrainView extends ItemView {
       n.x = d[0] * r + (rng() - .5) * 55; n.y = d[1] * r + (rng() - .5) * 55; n.z = d[2] * r + (rng() - .5) * 55;
     });
 
-    this.hiddenGroups = new Set();
+    this.hiddenGroups = new Set(this.groups.map((g, i) => (hiddenNames.has(g) ? i : -1)).filter((i) => i >= 0));
     this.hiddenKinds = this.hiddenKinds || new Set();
     this.layoutMode = this.layoutMode || "radial";
-    this.showAllLabels = false;
+    this.showAllLabels = !!this.showAllLabels;
     this.alpha = 1;
     this.hover = null; this.selected = null;
-    this.focusedGroup = null;
+    const focusedIdx = focusedName == null ? -1 : this.groups.indexOf(focusedName);
+    this.focusedGroup = focusedIdx >= 0 ? focusedIdx : null;
     this.sectorInfo = [];
     this.ringRadii = [];
     this.layoutExtent = 300;
@@ -385,7 +409,12 @@ class DatumBrainView extends ItemView {
     const hudTxt = hud.createDiv();
     this.zEl = hudTxt.createDiv({ cls: "db-z", text: "organism" });
     const hint = hudTxt.createDiv({ cls: "db-h" });
-    hint.innerHTML = "<b>click</b> a world or name to enter its system &middot; <b>Esc</b> zooms out &middot; <b>/</b> search";
+    hint.createEl("b", { text: "click" });
+    hint.appendText(" a world or name to enter its system \u00b7 ");
+    hint.createEl("b", { text: "Esc" });
+    hint.appendText(" zooms out \u00b7 ");
+    hint.createEl("b", { text: "/" });
+    hint.appendText(" search");
 
     this.buildTypeRows();
     this.buildChips();
@@ -524,6 +553,8 @@ class DatumBrainView extends ItemView {
   }
 
   async select(n, keepCam){
+    /* each selection is numbered: a slower, older read must never write into the reader */
+    const seq = ++this._selSeq;
     this.selected = n;
     if (this.layoutMode === "radial" && this.focusedGroup != null && n.g !== this.focusedGroup) this.focusedGroup = n.g;
     this.spawnParticles(n);
@@ -534,11 +565,6 @@ class DatumBrainView extends ItemView {
     sys.style.color = gcol(n.g);
     this.rMeta.createSpan({ text: "· " + n.id });
     this.rMeta.createSpan({ text: "· " + dt });
-    this.rBody.empty();
-    if (n.file){
-      const md = await this.app.vault.cachedRead(n.file);
-      await MarkdownRenderer.render(this.app, md, this.rBody, n.id, this);
-    }
     const bl = this.backlinks.get(n.id) || [];
     this.rBacks.empty();
     this.rBacks.createDiv({ cls: "db-bk", text: bl.length ? `↩ ${bl.length} backlink${bl.length > 1 ? "s" : ""}` : "no backlinks" });
@@ -546,9 +572,29 @@ class DatumBrainView extends ItemView {
       const d = this.rBacks.createDiv({ cls: "db-b", text: this.byId.get(id).t });
       d.dataset.id = id;
     }
-    this.readerEl.classList.add("db-open");
+    this.rBody.empty();
     this.rBody.scrollTop = 0;
+    /* rendered markdown owns a component of its own, released on the next selection */
+    if (this._readerComp){ this.removeChild(this._readerComp); this._readerComp = null; }
+    this.readerEl.classList.add("db-open");
     if (!keepCam) this.flyTo(n);
+    if (!n.file) return;
+    const comp = this._readerComp = this.addChild(new Component());
+    const doc = this.rBody.createDiv({ cls: "db-rdoc" });
+    try {
+      const md = await this.app.vault.cachedRead(n.file);
+      if (seq !== this._selSeq) return;
+      await MarkdownRenderer.render(this.app, md, doc, n.id, comp);
+    } catch (e){
+      /* a failed read is not an empty note: the reader says so */
+      console.error("[datum-brain] could not read " + n.id, e);
+      if (seq !== this._selSeq) return;
+      doc.empty();
+      const err = doc.createDiv({ cls: "db-rerr" });
+      err.createEl("b", { text: "This note could not be read." });
+      err.createDiv({ text: (e && e.message) ? e.message : String(e) });
+      err.createDiv({ cls: "db-rerr-hint", text: "The note is not empty \u2014 the read failed. Use Sync, or Open note to try it in the editor." });
+    }
   }
 
   clearSel(){
@@ -557,17 +603,20 @@ class DatumBrainView extends ItemView {
   }
 
   async resync(){
+    if (this._closed || !this.renderer) return;
     const selId = this.selected ? this.selected.id : null;
     const cam = this.camera ? this.camera.position.clone() : null;
     const tgt = this.controls ? this.controls.target.clone() : null;
+    const auto = this.controls ? this.controls.autoRotate : true;
     this.teardownScene();
     this.labelWrap.empty();
     this.buildGraph();
     this.buildTypeRows();
     this.buildChips();
     this.updateStats();
-    this.buildScene();
-    if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); }
+    try { this.buildScene(); }
+    catch (e){ this.failOpen(e); return; }
+    if (cam && tgt){ this.camera.position.copy(cam); this.controls.target.copy(tgt); this.controls.autoRotate = auto; }
     if (selId && this.byId.has(selId)) this.select(this.byId.get(selId), true);
   }
 
@@ -845,20 +894,22 @@ class DatumBrainView extends ItemView {
     });
     ro.observe(stage);
 
-    this._disposers.push(() => {
+    /* released by teardownScene, so a resync cannot leave the previous scene's observers behind */
+    this._sceneDisposers.push(() => {
       ro.disconnect();
       cvs.removeEventListener("pointerdown", onDown);
       cvs.removeEventListener("pointerup", onUp);
       cvs.removeEventListener("pointermove", onMove);
       controls.removeEventListener("change", onCtl);
-      this.teardownScene();
     });
   }
 
   teardownScene(){
+    const disposers = this._sceneDisposers; this._sceneDisposers = [];
+    disposers.forEach((fn) => { try { fn(); } catch (e){ console.error("[datum-brain] scene cleanup failed", e); } });
     if (!this.renderer) return;
     this.killParticles();
-    this.controls.dispose();
+    if (this.controls) this.controls.dispose();
     this.scene.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       const mat = o.material;
